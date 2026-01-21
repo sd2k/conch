@@ -1,0 +1,38 @@
+[package]
+name = "conch"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Virtual filesystem shell sandbox for agent tool call history"
+
+[features]
+default = []
+# Embed the pre-built WASM component into the library binary.
+# Requires building the component first:
+#   cargo build -p conch-wasm --target wasm32-unknown-unknown --release
+#   wasm-tools component new target/wasm32-unknown-unknown/release/conch_wasm.wasm \
+#     -o target/conch_component.wasm
+embedded-component = []
+# Embed the brush-based shell WASM module (wasip1).
+# Requires building the shell first:
+#   cargo build -p conch-shell --target wasm32-wasip1 --release
+embedded-shell = []
+
+[dependencies]
+wasmtime.workspace = true
+wasmtime-wasi.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+zstd.workspace = true
+libc.workspace = true
+
+[lib]
+crate-type = ["lib", "staticlib", "cdylib"]
+
+[lints]
+workspace = true

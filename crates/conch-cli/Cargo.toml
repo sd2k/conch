@@ -1,0 +1,18 @@
+[package]
+name = "conch-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "CLI for testing the Conch shell"
+
+[[bin]]
+name = "conch"
+path = "src/main.rs"
+
+[dependencies]
+conch = { path = "../conch", features = ["embedded-shell"] }
+anyhow.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,65 @@
+[workspace]
+resolver = "2"
+members = ["crates/conch", "crates/conch-cli", "crates/conch-shell"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+rust-version = "1.85"
+
+[workspace.dependencies]
+# Host runtime (wasmtime 41+ for component model)
+wasmtime = { version = "41", features = ["component-model", "async"] }
+wasmtime-wasi = "41"
+
+# Async
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Shell builtins (for WASM guest)
+regex-lite = "0.1"
+globset = "0.4"
+
+# Parsing - tree-sitter
+tree-sitter = "0.25"
+tree-sitter-bash = "0.25"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Compression (for embedded component)
+zstd = "0.13"
+
+# FFI
+libc = "0.2"
+
+[workspace.lints.rust]
+missing_debug_implementations = "warn"
+missing_docs = "warn"
+# Priority -1 ensures this lint group is applied before individual lints,
+# avoiding clippy::lint_groups_priority warning about ambiguous ordering.
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+all = "warn"
+unwrap_used = "warn"
+expect_used = "warn"
+
+# See https://nnethercote.github.io/perf-book/build-configuration.html
+[profile.release]
+codegen-units = 1
+lto = false
+
+# Optimize heavy deps in dev mode to speed up tests
+# (wasmtime/cranelift JIT is ~10-50x slower unoptimized)
+[profile.dev.package]
+cranelift-codegen.opt-level = 3
+regalloc2.opt-level = 3
+wasmtime.opt-level = 3
+wasmparser.opt-level = 3

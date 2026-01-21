@@ -1,0 +1,37 @@
+# Build artifacts
+/target
+
+# Cargo lock is committed for reproducibility
+# (don't ignore Cargo.lock)
+
+# IDE/editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Rust-specific
+**/*.rs.bk
+
+# Plans directory (local planning docs)
+/plans
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Coverage reports
+/coverage/
+*.lcov
+
+# Benchmarks output
+/criterion/
+
+# Scratch directory for random experiments
+/scratch
+
+# Pre-compiled WASM artifacts
+*.cwasm

@@ -1,0 +1,105 @@
+[tools]
+# Profile "default" includes rustc, rust-std, cargo, rust-docs, rustfmt, and clippy
+rust = "1.92"
+
+[tools."cargo:cargo-nextest"]
+version = "0.9"
+
+[tools."cargo:cargo-rail"]
+version = "0.8"
+
+[tools."cargo:wasm-tools"]
+version = "1"
+
+[tasks.check]
+description = "Run cargo check"
+run = "cargo check --workspace"
+
+[tasks.build]
+description = "Build all crates"
+run = "cargo build --workspace"
+
+[tasks.test]
+description = "Run tests"
+run = "cargo nextest run --workspace"
+
+[tasks.lint]
+description = "Run clippy lints"
+run = "cargo clippy --workspace --all-targets -- -D warnings"
+
+[tasks.lint-fix]
+description = "Auto-fix clippy warnings"
+run = "cargo clippy --fix --allow-dirty --workspace --all-targets"
+
+[tasks.fmt]
+description = "Format code"
+run = "cargo fmt --all"
+
+[tasks.fmt-check]
+description = "Check code formatting"
+run = "cargo fmt --all -- --check"
+
+[tasks.doc]
+description = "Generate documentation"
+run = "cargo doc --workspace --no-deps"
+
+[tasks.doc-open]
+description = "Generate and open documentation"
+run = "cargo doc --workspace --no-deps --open"
+
+[tasks.ci]
+description = "Run all CI checks"
+depends = ["fmt-check", "lint", "test"]
+
+[tasks.clean]
+description = "Clean build artifacts"
+run = "cargo clean"
+
+# WASM shell build tasks
+
+[tasks.wasm-target]
+description = "Install wasm32-wasip1 target"
+run = "rustup target add wasm32-wasip1"
+
+[tasks.wasm-build]
+description = "Build WASM shell module"
+depends = ["wasm-target"]
+sources = ["crates/conch-shell/src/**/*.rs", "crates/conch-shell/Cargo.toml"]
+outputs = ["target/wasm32-wasip1/release/conch_shell.wasm"]
+run = "cargo build -p conch-shell --target wasm32-wasip1 --release"
+
+[tasks.build-embedded]
+description = "Build library with embedded WASM shell"
+depends = ["wasm-build"]
+run = "cargo build -p conch --features embedded-shell --release"
+
+[tasks.build-release]
+description = "Build all crates in release mode (with embedded shell)"
+depends = ["wasm-build"]
+run = "cargo build --workspace --features embedded-shell --release"
+
+[tasks.test-go]
+description = "Run Go FFI tests"
+depends = ["build-embedded"]
+dir = "tests/go"
+run = "go test -v ./..."
+
+[tasks.test-all]
+description = "Run all tests (Rust + Go)"
+depends = ["test", "test-go"]
+
+[tasks.unify]
+description = "Unify workspace dependencies and prune dead features"
+run = "cargo rail unify"
+
+[tasks.unify-check]
+description = "Check for dependency drift (CI)"
+run = "cargo rail unify --check"
+
+[tasks.affected]
+description = "List affected crates"
+run = "cargo rail affected"
+
+[tasks.msrv]
+description = "Check compilation on minimum supported Rust version"
+run = "cargo +1.85 check --workspace"

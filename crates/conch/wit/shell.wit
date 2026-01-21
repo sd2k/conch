@@ -1,0 +1,67 @@
+package conch:shell@0.1.0;
+
+/// The conch shell runtime world.
+///
+/// This defines the interface between the host (Rust) and the guest (Shell WASM).
+/// The guest implements a bash-subset shell that can read from a virtual filesystem
+/// provided by the host.
+world shell {
+    /// Read a file from the virtual filesystem.
+    ///
+    /// The path uses the /ctx/... format for accessing agent context:
+    /// - /ctx/self/tools/{id}/request.json - Tool call request
+    /// - /ctx/self/tools/{id}/result.json - Tool call result
+    /// - /ctx/self/messages/{index} - Conversation message
+    /// - /ctx/self/scratch/{name} - Scratch space files
+    /// - /ctx/parent/... - Parent agent context (if allowed)
+    /// - /ctx/children/{id}/... - Child agent context
+    ///
+    /// Returns the file contents as bytes, or an error message.
+    import vfs-read: func(path: string) -> result<list<u8>, string>;
+
+    /// List directory contents in the virtual filesystem.
+    ///
+    /// Returns a list of entry names in the directory, or an error message.
+    import vfs-readdir: func(path: string) -> result<list<string>, string>;
+
+    /// Check if a path exists in the virtual filesystem.
+    import vfs-exists: func(path: string) -> result<bool, string>;
+
+    /// Get file/directory metadata.
+    ///
+    /// Returns a JSON object with metadata, or an error message.
+    /// For files: {"type": "file", "size": 1234}
+    /// For directories: {"type": "directory"}
+    import vfs-stat: func(path: string) -> result<string, string>;
+
+    /// Write to a scratch file in the virtual filesystem.
+    ///
+    /// Only paths under /ctx/self/scratch/ are writable.
+    import vfs-write: func(path: string, data: list<u8>) -> result<_, string>;
+
+    /// Get an environment variable.
+    import get-env: func(name: string) -> option<string>;
+
+    /// Output from executing a shell script.
+    record execute-output {
+        /// Shell exit code (0 = success).
+        exit-code: s32,
+        /// Captured stdout from the shell execution.
+        stdout: list<u8>,
+        /// Captured stderr from the shell execution.
+        stderr: list<u8>,
+    }
+
+    /// Execute a shell script.
+    ///
+    /// The script is parsed and executed using a bash-subset interpreter.
+    /// Built-in commands include: echo, cat, grep, jq, head, tail, wc, ls, test, etc.
+    ///
+    /// Returns the exit code and captured stdout/stderr.
+    export execute: func(script: string) -> execute-output;
+
+    /// Execute a shell script with stdin input.
+    ///
+    /// Like execute(), but provides stdin data to the script.
+    export execute-with-stdin: func(script: string, stdin: list<u8>) -> execute-output;
+}
