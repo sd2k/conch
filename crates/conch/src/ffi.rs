@@ -458,7 +458,17 @@ pub unsafe extern "C" fn conch_core_execute(
 
     let limits = ResourceLimits::default();
 
-    match executor.executor.execute(script_str, &limits) {
+    // Create a tokio runtime to run the async executor
+    // This is safe because FFI calls come from outside the async runtime
+    let rt = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt,
+        Err(e) => {
+            set_last_error(&format!("failed to create runtime: {}", e));
+            return ptr::null_mut();
+        }
+    };
+
+    match rt.block_on(executor.executor.execute(script_str, &limits)) {
         Ok(exec_result) => {
             let stdout_len = exec_result.stdout.len();
             let stderr_len = exec_result.stderr.len();

@@ -2,11 +2,12 @@
 # Profile "default" includes rustc, rust-std, cargo, rust-docs, rustfmt, and clippy
 rust = "1.92"
 
-[tools."cargo:cargo-nextest"]
-version = "0.9"
+# Commented out - cargo-binstall can't handle edition 2024 in these crates yet
+# [tools."cargo:cargo-nextest"]
+# version = "0.9"
 
-[tools."cargo:cargo-rail"]
-version = "0.8"
+# [tools."cargo:cargo-rail"]
+# version = "0.8"
 
 [tools."cargo:wasm-tools"]
 version = "1"
@@ -103,3 +104,15 @@ run = "cargo rail affected"
 [tasks.msrv]
 description = "Check compilation on minimum supported Rust version"
 run = "cargo +1.85 check --workspace"
+
+# MCP server tasks
+
+[tasks.build-mcp]
+description = "Build the MCP server binary"
+depends = ["wasm-build"]
+run = "cargo build -p conch-mcp --release"
+
+[tasks.run-mcp]
+description = "Run the MCP server (stdio transport)"
+depends = ["build-mcp"]
+run = "./target/release/conch-mcp"

@@ -43,7 +43,8 @@ impl std::fmt::Debug for CoreShellExecutor {
 impl CoreShellExecutor {
     /// Create a new executor by loading a module from a file.
     pub fn from_file(path: impl AsRef<Path>) -> Result<Self, RuntimeError> {
-        let config = Config::new();
+        let mut config = Config::new();
+        config.async_support(true);
         let engine = Engine::new(&config).map_err(|e| RuntimeError::Wasm(e.to_string()))?;
 
         let module = Module::from_file(&engine, path.as_ref())
@@ -54,7 +55,8 @@ impl CoreShellExecutor {
 
     /// Create a new executor by loading a module from bytes.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, RuntimeError> {
-        let config = Config::new();
+        let mut config = Config::new();
+        config.async_support(true);
         let engine = Engine::new(&config).map_err(|e| RuntimeError::Wasm(e.to_string()))?;
 
         let module = Module::new(&engine, bytes).map_err(|e| RuntimeError::Wasm(e.to_string()))?;
@@ -81,8 +83,8 @@ impl CoreShellExecutor {
         &self.engine
     }
 
-    /// Execute a shell script.
-    pub fn execute(
+    /// Execute a shell script asynchronously.
+    pub async fn execute(
         &self,
         script: &str,
         _limits: &ResourceLimits,
@@ -106,14 +108,15 @@ impl CoreShellExecutor {
         };
         let mut store = Store::new(&self.engine, state);
 
-        // Create linker with WASI preview1
+        // Create linker with WASI preview1 (async version)
         let mut linker = Linker::new(&self.engine);
-        wasmtime_wasi::p1::add_to_linker_sync(&mut linker, |s: &mut ShellState| &mut s.wasi)
+        wasmtime_wasi::p1::add_to_linker_async(&mut linker, |s: &mut ShellState| &mut s.wasi)
             .map_err(|e| RuntimeError::Wasm(e.to_string()))?;
 
-        // Instantiate the module
+        // Instantiate the module asynchronously
         let instance = linker
-            .instantiate(&mut store, &self.module)
+            .instantiate_async(&mut store, &self.module)
+            .await
             .map_err(|e| RuntimeError::Wasm(e.to_string()))?;
 
         // Get memory and exported execute function
@@ -135,9 +138,10 @@ impl CoreShellExecutor {
             .write(&mut store, script_ptr as usize, script_bytes)
             .map_err(|e| RuntimeError::Wasm(format!("failed to write script: {}", e)))?;
 
-        // Call execute - brush will write to WASI stdout/stderr which we capture via pipes
+        // Call execute asynchronously - brush will write to WASI stdout/stderr which we capture via pipes
         let exit_code = execute_fn
-            .call(&mut store, (script_ptr, script_bytes.len() as i32))
+            .call_async(&mut store, (script_ptr, script_bytes.len() as i32))
+            .await
             .map_err(|e| RuntimeError::Wasm(format!("execute failed: {}", e)))?;
 
         // Get captured stdout/stderr from the pipes
@@ -184,8 +188,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_core_execute_echo() {
+    #[tokio::test]
+    async fn test_core_execute_echo() {
         let Some(executor) = get_executor() else {
             eprintln!(
                 "Skipping test: module not built. Run: cargo build -p conch-shell --target wasm32-wasip1 --release"
@@ -195,32 +199,35 @@ mod tests {
 
         let result = executor
             .execute("echo hello", &ResourceLimits::default())
+            .await
             .expect("execute failed");
 
         assert_eq!(result.exit_code, 0);
     }
 
-    #[test]
-    fn test_core_execute_variable() {
+    #[tokio::test]
+    async fn test_core_execute_variable() {
         let Some(executor) = get_executor() else {
             return;
         };
 
         let result = executor
             .execute("x=42; echo $x", &ResourceLimits::default())
+            .await
             .expect("execute failed");
 
         assert_eq!(result.exit_code, 0);
     }
 
-    #[test]
-    fn test_core_execute_false() {
+    #[tokio::test]
+    async fn test_core_execute_false() {
         let Some(executor) = get_executor() else {
             return;
         };
 
         let result = executor
             .execute("false", &ResourceLimits::default())
+            .await
             .expect("execute failed");
 
         assert_eq!(result.exit_code, 1);

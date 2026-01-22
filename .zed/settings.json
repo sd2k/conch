@@ -1,0 +1,11 @@
+{
+  "context_servers": {
+    "conch": {
+      "command": "mise",
+      "args": ["run", "run-mcp"],
+      "env": {
+        "RUST_LOG": "info",
+      },
+    },
+  },
+}

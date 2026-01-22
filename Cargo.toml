@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/conch", "crates/conch-cli", "crates/conch-shell"]
+members = ["crates/conch", "crates/conch-cli", "crates/conch-mcp", "crates/conch-shell"]
 
 [workspace.package]
 version = "0.1.0"
@@ -38,6 +38,9 @@ zstd = "0.13"
 
 # FFI
 libc = "0.2"
+
+# Logging/tracing
+tracing = "0.1"
 
 [workspace.lints.rust]
 missing_debug_implementations = "warn"

@@ -2,6 +2,25 @@
 
 Context for AI agents working on this codebase.
 
+## Important: Use mise for all commands
+
+**Always prefer `mise run <task>` over manual `cargo` commands.** The mise tasks handle proper build ordering, feature flags, and dependencies. Manual cargo commands may miss required build steps or use incorrect flags.
+
+```bash
+# ✅ Good - use mise tasks
+mise run build
+mise run test
+mise run lint
+mise run check
+
+# ❌ Avoid - manual cargo commands may miss dependencies
+cargo build
+cargo test
+cargo clippy
+```
+
+See the "Commands (via mise)" section below for the full list of available tasks.
+
 ## What This Project Does
 
 Conch is a **sandboxed shell execution engine**. It compiles a bash-compatible shell (brush) to WebAssembly and runs it via wasmtime with strict resource limits. The intended use case is letting AI agents query their execution context using shell commands.
@@ -64,6 +83,10 @@ crates/
 │   ├── src/ffi.rs           # C FFI exports for Go
 │   └── src/tests.rs         # Unit tests
 │
+├── conch-mcp/                # MCP server for AI assistant integration
+│   ├── src/lib.rs           # ConchServer implementation with tool router
+│   └── src/main.rs          # MCP server binary (stdio transport)
+│
 ├── conch-shell/              # WASM shell module
 │   ├── src/lib.rs           # FFI exports: execute(), get_stdout(), etc.
 │   └── src/builtins/        # Custom builtins (placeholder)
@@ -84,22 +107,38 @@ plans/
 
 ## Commands (via mise)
 
-```bash
-mise run build           # cargo build --workspace
-mise run test            # cargo nextest run --workspace
-mise run lint            # cargo clippy --workspace
-mise run fmt             # cargo fmt --all
+**Always use these mise tasks instead of manual cargo commands.**
 
+```bash
+# Basic development
+mise run check           # Check all crates compile
+mise run build           # Build all crates
+mise run test            # Run tests (uses cargo-nextest)
+mise run lint            # Run clippy lints
+mise run fmt             # Format code
+
+# WASM and embedded builds
 mise run wasm-build      # Build WASM shell module (wasm32-wasip1)
 mise run build-embedded  # Build library with embedded shell
 mise run build-release   # Full release build with embedded shell
 
+# MCP server
+mise run build-mcp       # Build the MCP server binary
+mise run run-mcp         # Run the MCP server (stdio transport)
+
+# Testing
 mise run test-go         # Run Go FFI tests
 mise run test-all        # Rust + Go tests
 
+# CI and validation
 mise run ci              # fmt-check, lint, test
 mise run msrv            # Check MSRV (1.85)
 ```
+
+Why mise over cargo?
+- Tasks handle proper dependency ordering (e.g., WASM must be built before embedded builds)
+- Tasks use the correct feature flags automatically
+- Tasks ensure consistent behavior across development and CI
 
 ## Key Files to Understand
 
@@ -107,6 +146,7 @@ mise run msrv            # Check MSRV (1.85)
 |------|---------|
 | `crates/conch/src/wasm_core.rs` | Main executor — loads WASM, runs scripts |
 | `crates/conch/src/ffi.rs` | C FFI layer for Go integration |
+| `crates/conch-mcp/src/lib.rs` | MCP server with `execute` tool |
 | `crates/conch-shell/src/lib.rs` | WASM module entry point |
 | `tests/go/conch.go` | Go bindings using purego |
 
@@ -114,6 +154,7 @@ mise run msrv            # Check MSRV (1.85)
 
 - `target/wasm32-wasip1/release/conch_shell.wasm` — The shell WASM module
 - `target/release/libconch.so` (Linux) / `libconch.dylib` (macOS) — FFI library
+- `target/release/conch-mcp` — MCP server binary
 
 ## Cargo Features
 
@@ -157,9 +198,29 @@ mise run test-go
 
 ### Debugging WASM execution
 
-The CLI tool is useful for testing:
+The CLI tool is useful for testing (after building with mise):
 ```bash
-cargo run -p conch-cli -- -c "echo hello | cat"
+mise run build-embedded
+./target/release/conch-cli -c "echo hello | cat"
+```
+
+### Running the MCP server
+
+Build and run the MCP server for AI assistant integration:
+```bash
+mise run build-embedded  # Build with embedded WASM module
+cargo run -p conch-mcp   # Run MCP server over stdio
+```
+
+Configure in Claude Desktop (`~/Library/Application Support/Claude/claude_desktop_config.json`):
+```json
+{
+  "mcpServers": {
+    "conch": {
+      "command": "/path/to/target/release/conch-mcp"
+    }
+  }
+}
 ```
 
 ## Dependencies

@@ -209,8 +209,7 @@ impl Conch {
         let _vfs = context.build_fs();
 
         // Execute via the core shell executor
-        // This runs synchronously but we're in an async context for the semaphore
-        self.executor.execute(script, &limits)
+        self.executor.execute(script, &limits).await
     }
 
     /// Execute a shell script without an execution context.
@@ -227,7 +226,7 @@ impl Conch {
             .await
             .map_err(|_| RuntimeError::Semaphore)?;
 
-        self.executor.execute(script, &limits)
+        self.executor.execute(script, &limits).await
     }
 
     /// Get the maximum concurrent executions
