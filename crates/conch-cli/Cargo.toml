@@ -11,7 +11,7 @@ name = "conch"
 path = "src/main.rs"
 
 [dependencies]
-conch = { path = "../conch", features = ["embedded-shell"] }
+conch = { workspace = true, features = ["embedded-shell"] }
 anyhow.workspace = true
 
 [lints]

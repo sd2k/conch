@@ -41,6 +41,14 @@ libc = "0.2"
 
 # Logging/tracing
 tracing = "0.1"
+brush-builtins = { path = "../brush/brush-builtins", default-features = false }
+brush-core = { path = "../brush/brush-core", default-features = false }
+conch = { path = "crates/conch" }
+jaq-core = "3.0.0-beta"
+jaq-json = "2.0.0-beta"
+jaq-std = "3.0.0-beta"
+rmcp = "0.13"
+tracing-subscriber = "0.3"
 
 [workspace.lints.rust]
 missing_debug_implementations = "warn"

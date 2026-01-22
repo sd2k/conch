@@ -279,10 +279,17 @@ mod pipe_tests {
     fn test_simple_pipe() {
         eprintln!("Starting pipe test...");
         let result = execute_script("echo hello | cat");
-        eprintln!("Result: exit_code={}, stdout={:?}, stderr={:?}", 
+        eprintln!(
+            "Result: exit_code={}, stdout={:?}, stderr={:?}",
             result.exit_code,
             String::from_utf8_lossy(&result.stdout),
-            String::from_utf8_lossy(&result.stderr));
-        assert_eq!(result.exit_code, 0, "stderr: {}", String::from_utf8_lossy(&result.stderr));
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(
+            result.exit_code,
+            0,
+            "stderr: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
     }
 }
