@@ -90,7 +90,10 @@ crates/
 ├── conch/                    # Main host library
 │   ├── src/lib.rs           # Public API exports
 │   ├── src/runtime.rs       # Conch struct, ExecutionContext, ExecutionResult
-│   ├── src/wasm_core.rs     # CoreShellExecutor (wasip1 + brush)
+│   ├── src/executor/        # Shell executors
+│   │   ├── mod.rs           # Module exports
+│   │   ├── core.rs          # CoreShellExecutor (wasip1 + brush)
+│   │   └── component.rs     # ComponentShellExecutor (wasip2, placeholder)
 │   ├── src/vfs.rs           # Virtual filesystem traits (ContextFs, ContextProvider)
 │   ├── src/limits.rs        # ResourceLimits struct
 │   ├── src/ffi.rs           # C FFI exports for Go
@@ -159,7 +162,8 @@ The mise `depends` ensures correct task ordering — the WASM module must be bui
 
 | File | Purpose |
 |------|---------|
-| `crates/conch/src/wasm_core.rs` | Main executor — loads WASM, runs scripts via InstancePre |
+| `crates/conch/src/executor/core.rs` | CoreShellExecutor — loads WASM, runs scripts via InstancePre |
+| `crates/conch/src/executor/component.rs` | ComponentShellExecutor — wasip2 executor (placeholder for VFS) |
 | `crates/conch/src/ffi.rs` | C FFI layer for Go integration |
 | `crates/conch/src/vfs.rs` | ContextFs and ContextProvider for virtual filesystem |
 | `crates/conch-mcp/src/lib.rs` | MCP server with `execute` tool |
@@ -195,6 +199,7 @@ The current implementation:
 - ✅ Basic resource limits (CPU epochs, memory, output)
 - ✅ Go FFI bindings via purego
 - ✅ InstancePre for efficient per-call instantiation
+- ✅ Executor module structure (core.rs for wasip1, component.rs placeholder for wasip2)
 - ⏳ VFS integration (ContextFs implemented, not yet wired to WASM execution)
 
 ## VFS Integration (Planned)

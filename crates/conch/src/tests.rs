@@ -3,8 +3,8 @@
 #[cfg(all(test, feature = "embedded-shell"))]
 #[allow(clippy::expect_used)]
 mod embedded_tests {
+    use crate::executor::CoreShellExecutor;
     use crate::limits::ResourceLimits;
-    use crate::wasm_core::CoreShellExecutor;
 
     fn executor() -> CoreShellExecutor {
         CoreShellExecutor::embedded().expect("Failed to create embedded executor")

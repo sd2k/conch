@@ -20,8 +20,8 @@ use std::cell::RefCell;
 use std::ffi::{CStr, CString, c_char};
 use std::ptr;
 
+use crate::executor::CoreShellExecutor;
 use crate::limits::ResourceLimits;
-use crate::wasm_core::CoreShellExecutor;
 
 thread_local! {
     static LAST_ERROR: RefCell<Option<CString>> = const { RefCell::new(None) };

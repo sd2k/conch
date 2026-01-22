@@ -7,9 +7,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::Semaphore;
 
+use crate::executor::CoreShellExecutor;
 use crate::limits::ResourceLimits;
 use crate::vfs::{AccessPolicy, ContextFs, ContextProvider};
-use crate::wasm_core::CoreShellExecutor;
 
 /// Errors that can occur during shell execution
 #[derive(Debug, Error)]

@@ -18,7 +18,7 @@ use crate::runtime::{ExecutionResult, ExecutionStats, RuntimeError};
 /// Embedded WASM module bytes (when built with `embedded-shell` feature).
 #[cfg(feature = "embedded-shell")]
 static EMBEDDED_SHELL: &[u8] =
-    include_bytes!("../../../target/wasm32-wasip1/release/conch_shell.wasm");
+    include_bytes!("../../../../target/wasm32-wasip1/release/conch_shell.wasm");
 
 /// State held by the WASM store during execution.
 pub struct ShellState {
