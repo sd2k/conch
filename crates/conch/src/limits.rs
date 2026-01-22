@@ -113,6 +113,7 @@ impl std::io::Write for LimitedBuffer {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::write_literal)]
 mod tests {
     use super::*;
     use std::io::Write as _;

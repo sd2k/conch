@@ -174,6 +174,7 @@ impl ShellExecutor {
 }
 
 /// Create a shared engine for multiple executors.
+#[allow(dead_code)]
 pub fn create_engine() -> Result<Engine, RuntimeError> {
     let mut config = Config::new();
     config.wasm_component_model(true);
@@ -181,11 +182,13 @@ pub fn create_engine() -> Result<Engine, RuntimeError> {
 }
 
 /// Load a component from bytes using a shared engine.
+#[allow(dead_code)]
 pub fn load_component(engine: &Engine, bytes: &[u8]) -> Result<Component, RuntimeError> {
     Component::new(engine, bytes).map_err(|e| RuntimeError::Wasm(e.to_string()))
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

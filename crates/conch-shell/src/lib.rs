@@ -31,29 +31,41 @@ fn exit_code() -> &'static Mutex<i32> {
 ///
 /// Output is captured in global buffers and can be retrieved with
 /// `get_stdout`, `get_stderr`.
+///
+/// # Safety
+/// - `script_ptr` must be a valid pointer to `script_len` bytes of UTF-8 data,
+///   or null (in which case 0 is returned immediately).
 #[unsafe(no_mangle)]
-pub extern "C" fn execute(script_ptr: *const u8, script_len: usize) -> i32 {
-    // Clear buffers
-    stdout_buf().lock().unwrap().clear();
-    stderr_buf().lock().unwrap().clear();
-    *exit_code().lock().unwrap() = 0;
+pub unsafe extern "C" fn execute(script_ptr: *const u8, script_len: usize) -> i32 {
+    // Clear buffers - use expect since poisoned mutex is unrecoverable
+    #[allow(clippy::expect_used)]
+    stdout_buf().lock().expect("stdout mutex poisoned").clear();
+    #[allow(clippy::expect_used)]
+    stderr_buf().lock().expect("stderr mutex poisoned").clear();
+    #[allow(clippy::expect_used)]
+    {
+        *exit_code().lock().expect("exit_code mutex poisoned") = 0;
+    }
 
     // Parse script string
     let script = if script_ptr.is_null() || script_len == 0 {
         return 0;
     } else {
-        unsafe {
-            let slice = std::slice::from_raw_parts(script_ptr, script_len);
-            match std::str::from_utf8(slice) {
-                Ok(s) => s.to_string(),
-                Err(_) => {
-                    stderr_buf()
-                        .lock()
-                        .unwrap()
-                        .extend_from_slice(b"invalid UTF-8 in script\n");
-                    *exit_code().lock().unwrap() = 1;
-                    return 1;
+        // SAFETY: Caller guarantees script_ptr points to valid memory of script_len bytes
+        let slice = unsafe { std::slice::from_raw_parts(script_ptr, script_len) };
+        match std::str::from_utf8(slice) {
+            Ok(s) => s.to_string(),
+            Err(_) => {
+                #[allow(clippy::expect_used)]
+                stderr_buf()
+                    .lock()
+                    .expect("stderr mutex poisoned")
+                    .extend_from_slice(b"invalid UTF-8 in script\n");
+                #[allow(clippy::expect_used)]
+                {
+                    *exit_code().lock().expect("exit_code mutex poisoned") = 1;
                 }
+                return 1;
             }
         }
     };
@@ -65,11 +77,15 @@ pub extern "C" fn execute(script_ptr: *const u8, script_len: usize) -> i32 {
     {
         Ok(rt) => rt,
         Err(e) => {
+            #[allow(clippy::expect_used)]
             stderr_buf()
                 .lock()
-                .unwrap()
+                .expect("stderr mutex poisoned")
                 .extend_from_slice(format!("failed to create runtime: {}\n", e).as_bytes());
-            *exit_code().lock().unwrap() = 1;
+            #[allow(clippy::expect_used)]
+            {
+                *exit_code().lock().expect("exit_code mutex poisoned") = 1;
+            }
             return 1;
         }
     };
@@ -102,13 +118,27 @@ pub extern "C" fn execute(script_ptr: *const u8, script_len: usize) -> i32 {
     match result {
         Ok(code) => {
             let code_i32 = i32::from(u8::from(code));
-            *exit_code().lock().unwrap() = code_i32;
+            #[allow(clippy::expect_used)]
+            {
+                *exit_code().lock().expect("exit_code mutex poisoned") = code_i32;
+            }
             code_i32
         }
         Err(e) => {
-            stderr_buf().lock().unwrap().extend_from_slice(e.as_bytes());
-            stderr_buf().lock().unwrap().push(b'\n');
-            *exit_code().lock().unwrap() = 1;
+            #[allow(clippy::expect_used)]
+            stderr_buf()
+                .lock()
+                .expect("stderr mutex poisoned")
+                .extend_from_slice(e.as_bytes());
+            #[allow(clippy::expect_used)]
+            stderr_buf()
+                .lock()
+                .expect("stderr mutex poisoned")
+                .push(b'\n');
+            #[allow(clippy::expect_used)]
+            {
+                *exit_code().lock().expect("exit_code mutex poisoned") = 1;
+            }
             1
         }
     }
@@ -117,15 +147,21 @@ pub extern "C" fn execute(script_ptr: *const u8, script_len: usize) -> i32 {
 /// Get the length of captured stdout.
 #[unsafe(no_mangle)]
 pub extern "C" fn get_stdout_len() -> usize {
-    stdout_buf().lock().unwrap().len()
+    #[allow(clippy::expect_used)]
+    stdout_buf().lock().expect("stdout mutex poisoned").len()
 }
 
 /// Copy captured stdout to the provided buffer.
+///
+/// # Safety
+/// - `buf_ptr` must be null or a valid pointer to at least `buf_len` bytes of writable memory.
 #[unsafe(no_mangle)]
-pub extern "C" fn get_stdout(buf_ptr: *mut u8, buf_len: usize) -> usize {
-    let stdout = stdout_buf().lock().unwrap();
+pub unsafe extern "C" fn get_stdout(buf_ptr: *mut u8, buf_len: usize) -> usize {
+    #[allow(clippy::expect_used)]
+    let stdout = stdout_buf().lock().expect("stdout mutex poisoned");
     let copy_len = std::cmp::min(stdout.len(), buf_len);
     if !buf_ptr.is_null() && copy_len > 0 {
+        // SAFETY: Caller guarantees buf_ptr is valid for copy_len bytes
         unsafe {
             std::ptr::copy_nonoverlapping(stdout.as_ptr(), buf_ptr, copy_len);
         }
@@ -136,15 +172,21 @@ pub extern "C" fn get_stdout(buf_ptr: *mut u8, buf_len: usize) -> usize {
 /// Get the length of captured stderr.
 #[unsafe(no_mangle)]
 pub extern "C" fn get_stderr_len() -> usize {
-    stderr_buf().lock().unwrap().len()
+    #[allow(clippy::expect_used)]
+    stderr_buf().lock().expect("stderr mutex poisoned").len()
 }
 
 /// Copy captured stderr to the provided buffer.
+///
+/// # Safety
+/// - `buf_ptr` must be null or a valid pointer to at least `buf_len` bytes of writable memory.
 #[unsafe(no_mangle)]
-pub extern "C" fn get_stderr(buf_ptr: *mut u8, buf_len: usize) -> usize {
-    let stderr = stderr_buf().lock().unwrap();
+pub unsafe extern "C" fn get_stderr(buf_ptr: *mut u8, buf_len: usize) -> usize {
+    #[allow(clippy::expect_used)]
+    let stderr = stderr_buf().lock().expect("stderr mutex poisoned");
     let copy_len = std::cmp::min(stderr.len(), buf_len);
     if !buf_ptr.is_null() && copy_len > 0 {
+        // SAFETY: Caller guarantees buf_ptr is valid for copy_len bytes
         unsafe {
             std::ptr::copy_nonoverlapping(stderr.as_ptr(), buf_ptr, copy_len);
         }
@@ -155,7 +197,8 @@ pub extern "C" fn get_stderr(buf_ptr: *mut u8, buf_len: usize) -> usize {
 /// Get the exit code from the last execution.
 #[unsafe(no_mangle)]
 pub extern "C" fn get_exit_code() -> i32 {
-    *exit_code().lock().unwrap()
+    #[allow(clippy::expect_used)]
+    *exit_code().lock().expect("exit_code mutex poisoned")
 }
 
 // ============================================================================
@@ -175,6 +218,7 @@ pub struct ExecuteResult {
 
 /// Execute a shell script and return the result (native API for testing).
 pub fn execute_script(script: &str) -> ExecuteResult {
+    #[allow(clippy::expect_used)]
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

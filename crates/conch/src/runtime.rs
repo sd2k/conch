@@ -236,6 +236,7 @@ impl Conch {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::vfs::MockContextProvider;
@@ -244,7 +245,7 @@ mod tests {
         // Try embedded first
         #[cfg(feature = "embedded-shell")]
         {
-            return Conch::embedded(1).ok();
+            Conch::embedded(1).ok()
         }
 
         // Fall back to file-based

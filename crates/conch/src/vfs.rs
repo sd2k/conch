@@ -320,7 +320,7 @@ impl ContextFs {
                     "parent_agent_id": self.policy.parent_agent_id,
                     "child_agent_ids": self.policy.child_agent_ids,
                 });
-                Ok(serde_json::to_vec_pretty(&meta).unwrap())
+                serde_json::to_vec_pretty(&meta).map_err(|e| FsError::Provider(e.to_string()))
             }
             ContextPath::SelfToolCallFile { id, file } => {
                 let tool_call = self
@@ -531,9 +531,10 @@ impl ContextFs {
                     "tool": tool_call.tool,
                     "params": tool_call.params,
                 });
-                Ok(serde_json::to_vec_pretty(&request).unwrap())
+                serde_json::to_vec_pretty(&request).map_err(|e| FsError::Provider(e.to_string()))
             }
-            "result.json" => Ok(serde_json::to_vec_pretty(&tool_call.result).unwrap()),
+            "result.json" => serde_json::to_vec_pretty(&tool_call.result)
+                .map_err(|e| FsError::Provider(e.to_string())),
             "meta.json" => {
                 let meta = serde_json::json!({
                     "id": tool_call.id,
@@ -544,7 +545,7 @@ impl ContextFs {
                     "success": tool_call.success,
                     "error": tool_call.error,
                 });
-                Ok(serde_json::to_vec_pretty(&meta).unwrap())
+                serde_json::to_vec_pretty(&meta).map_err(|e| FsError::Provider(e.to_string()))
             }
             _ => Err(FsError::NotFound(file.to_string())),
         }
@@ -664,6 +665,7 @@ impl ContextProvider for MockContextProvider {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

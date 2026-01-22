@@ -14,7 +14,7 @@ wasmtime = { version = "41", features = ["component-model", "async"] }
 wasmtime-wasi = "41"
 
 # Async
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1" }
 async-trait = "0.1"
 
 # Serialization
@@ -41,8 +41,8 @@ libc = "0.2"
 
 # Logging/tracing
 tracing = "0.1"
-brush-builtins = { path = "../brush/brush-builtins", default-features = false }
-brush-core = { path = "../brush/brush-core", default-features = false }
+brush-builtins = { git = "https://github.com/sd2k/brush", branch = "more-wasi-compat", default-features = false }
+brush-core = { git = "https://github.com/sd2k/brush", branch = "more-wasi-compat", default-features = false }
 conch = { path = "crates/conch" }
 jaq-core = "3.0.0-beta"
 jaq-json = "2.0.0-beta"

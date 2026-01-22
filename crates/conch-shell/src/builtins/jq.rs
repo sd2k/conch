@@ -230,9 +230,7 @@ impl JqOpts {
         };
 
         let mut positional = Vec::new();
-        let mut args_iter = args.iter();
-
-        while let Some(arg) = args_iter.next() {
+        for arg in args.iter() {
             match arg.as_str() {
                 "-c" | "--compact-output" => opts.compact = true,
                 "-r" | "--raw-output" => opts.raw_output = true,

@@ -189,6 +189,7 @@ impl ServerHandler for ConchServer {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
 

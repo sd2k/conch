@@ -9,7 +9,8 @@ use std::io::{self, Read, Write};
 
 use conch::{CoreShellExecutor, ResourceLimits};
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let args: Vec<String> = std::env::args().collect();
 
     let script = if args.len() >= 3 && args[1] == "-c" {
@@ -45,7 +46,7 @@ fn main() {
 
     // Execute the script
     let limits = ResourceLimits::default();
-    let result = match executor.execute(&script, &limits) {
+    let result = match executor.execute(&script, &limits).await {
         Ok(r) => r,
         Err(e) => {
             eprintln!("conch: execution error: {}", e);

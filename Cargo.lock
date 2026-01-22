@@ -250,6 +250,7 @@ dependencies = [
 [[package]]
 name = "brush-builtins"
 version = "0.1.0"
+source = "git+https://github.com/sd2k/brush?branch=more-wasi-compat#5ba7f7b66c379a7b0beb43e5b6e9a57ec1ba5dbc"
 dependencies = [
  "brush-core",
  "brush-parser",
@@ -273,6 +274,7 @@ dependencies = [
 [[package]]
 name = "brush-core"
 version = "0.4.0"
+source = "git+https://github.com/sd2k/brush?branch=more-wasi-compat#5ba7f7b66c379a7b0beb43e5b6e9a57ec1ba5dbc"
 dependencies = [
  "async-recursion",
  "async-trait",
@@ -308,6 +310,7 @@ dependencies = [
 [[package]]
 name = "brush-parser"
 version = "0.3.0"
+source = "git+https://github.com/sd2k/brush?branch=more-wasi-compat#5ba7f7b66c379a7b0beb43e5b6e9a57ec1ba5dbc"
 dependencies = [
  "bon",
  "cached",
@@ -602,6 +605,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "conch",
+ "tokio",
 ]
 
 [[package]]

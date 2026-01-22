@@ -84,11 +84,13 @@ use crate::wasm::ShellExecutor;
 use crate::wasm_core::CoreShellExecutor;
 
 /// Opaque handle to a shell executor (component model)
+#[derive(Debug)]
 pub struct ConchExecutor {
     executor: ShellExecutor,
 }
 
 /// Opaque handle to a core shell executor (wasip1)
+#[derive(Debug)]
 pub struct ConchCoreExecutor {
     executor: CoreShellExecutor,
 }
@@ -212,7 +214,8 @@ pub unsafe extern "C" fn conch_execute(
     executor: *mut ConchExecutor,
     script: *const c_char,
 ) -> *mut ConchResult {
-    conch_execute_with_stdin(executor, script, ptr::null(), 0)
+    // SAFETY: We're passing null for stdin which is explicitly allowed by conch_execute_with_stdin
+    unsafe { conch_execute_with_stdin(executor, script, ptr::null(), 0) }
 }
 
 /// Execute a shell script with stdin input.
@@ -510,6 +513,7 @@ pub unsafe extern "C" fn conch_core_execute(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use std::mem;

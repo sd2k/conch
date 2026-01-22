@@ -22,7 +22,7 @@ embedded-shell = []
 [dependencies]
 wasmtime.workspace = true
 wasmtime-wasi.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["full"] }
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
