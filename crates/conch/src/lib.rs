@@ -7,7 +7,6 @@
 mod limits;
 mod runtime;
 mod vfs;
-mod wasm;
 mod wasm_core;
 
 #[cfg(test)]
@@ -18,5 +17,4 @@ pub mod ffi;
 pub use limits::ResourceLimits;
 pub use runtime::{Conch, ExecutionContext, ExecutionResult, ExecutionStats, RuntimeError};
 pub use vfs::{AccessPolicy, ContextFs, ContextProvider, DirEntry, FsError, Metadata};
-pub use wasm::ShellExecutor;
 pub use wasm_core::CoreShellExecutor;

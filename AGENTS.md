@@ -2,6 +2,21 @@
 
 Context for AI agents working on this codebase.
 
+## Important: Read the Notes and Plans
+
+Before making significant changes, check these directories:
+
+- **`notes/`** — Current design decisions, architecture notes, and roadmaps
+  - `roadmap-cleanup.md` — The plan for migrating to wasip2 and adding VFS
+  - `vfs-architecture.md` — How VFS works via WASI shadowing (eryx pattern)
+  - `wasip1-vs-wasip2.md` — Why we're switching to wasip2
+  
+- **`plans/`** — Original design documents (gitignored, may be outdated)
+  - Useful for understanding original intent
+  - `notes/` has more current information
+
+These documents explain *why* things are the way they are and *where* we're headed. Some notes are transient and may be removed once implemented.
+
 ## Important: Use mise for all commands
 
 **Always prefer `mise run <task>` over manual `cargo` commands.** The mise tasks handle proper build ordering, feature flags, and dependencies. Manual cargo commands may miss required build steps or use incorrect flags.
@@ -44,7 +59,8 @@ Conch is a **sandboxed shell execution engine**. It compiles a bash-compatible s
 │  │  wasmtime runtime                                 │  │
 │  │  - WASI Preview 1 (wasip1)                        │  │
 │  │  - Epoch-based CPU interruption                   │  │
-│  │  - Memory limits                                  │  │
+│  │  - Memory limits via ResourceLimiter              │  │
+│  │  - InstancePre for fast per-call instantiation    │  │
 │  └───────────────────────────────────────────────────┘  │
 │                          │                              │
 │                          ▼                              │
@@ -61,13 +77,11 @@ Conch is a **sandboxed shell execution engine**. It compiles a bash-compatible s
 
 1. **brush over custom parser**: The plans mention building a custom tree-sitter parser, but the actual implementation uses [brush](https://github.com/reubeno/brush) — a mature bash-compatible shell. This gives full bash compatibility with less effort.
 
-2. **wasip1 over wasip2**: Plans mention WASI Preview 2, but implementation uses `wasm32-wasip1` for broader compatibility with brush and wasmtime.
+2. **wasip1 with WASI shadowing**: The shell compiles to `wasm32-wasip1`. For VFS support, the host will shadow WASI filesystem interfaces to route `/ctx/...` paths to a virtual context filesystem (following the eryx pattern).
 
 3. **purego over CGO**: Go bindings use [purego](https://github.com/ebitengine/purego) to call the Rust library without CGO, simplifying cross-compilation.
 
-4. **Two executor types**:
-   - `ShellExecutor`: Component model executor (planned, not fully implemented)
-   - `CoreShellExecutor`: wasip1 executor with brush shell (working)
+4. **InstancePre for performance**: The executor pre-links the WASM module once at construction, then creates a fresh Store per execution. This avoids re-linking overhead while ensuring each execution has isolated state.
 
 ## Repository Layout
 
@@ -77,8 +91,7 @@ crates/
 │   ├── src/lib.rs           # Public API exports
 │   ├── src/runtime.rs       # Conch struct, ExecutionContext, ExecutionResult
 │   ├── src/wasm_core.rs     # CoreShellExecutor (wasip1 + brush)
-│   ├── src/wasm.rs          # ShellExecutor (component model, planned)
-│   ├── src/vfs.rs           # Virtual filesystem traits
+│   ├── src/vfs.rs           # Virtual filesystem traits (ContextFs, ContextProvider)
 │   ├── src/limits.rs        # ResourceLimits struct
 │   ├── src/ffi.rs           # C FFI exports for Go
 │   └── src/tests.rs         # Unit tests
@@ -101,23 +114,24 @@ tests/go/
 
 plans/
 ├── conch.md                  # Original design doc (VFS, agent context)
-├── conch-implementation.md   # Implementation plan (tree-sitter, wasip2)
+├── conch-implementation.md   # Implementation plan
+├── vfs-integration.md        # VFS via WASI shadowing (eryx pattern)
 └── testing.md                # Test strategy
 ```
 
 ## Commands (via mise)
 
-**Always use these mise tasks instead of manual cargo commands.**
+**Use mise tasks for builds that involve the WASM module.** For simple Rust-only work, plain cargo commands are fine.
 
 ```bash
-# Basic development
+# Basic development (cargo or mise both work)
 mise run check           # Check all crates compile
 mise run build           # Build all crates
 mise run test            # Run tests (uses cargo-nextest)
 mise run lint            # Run clippy lints
 mise run fmt             # Format code
 
-# WASM and embedded builds
+# WASM and embedded builds (use mise for correct ordering)
 mise run wasm-build      # Build WASM shell module (wasm32-wasip1)
 mise run build-embedded  # Build library with embedded shell
 mise run build-release   # Full release build with embedded shell
@@ -135,17 +149,19 @@ mise run ci              # fmt-check, lint, test
 mise run msrv            # Check MSRV (1.85)
 ```
 
-Why mise over cargo?
-- Tasks handle proper dependency ordering (e.g., WASM must be built before embedded builds)
-- Tasks use the correct feature flags automatically
-- Tasks ensure consistent behavior across development and CI
+### Why mise for WASM builds?
+
+The mise `depends` ensures correct task ordering — the WASM module must be built before the host library that embeds it. For example, `build-embedded` depends on `wasm-build`.
+
+**Note on caching**: Cargo automatically tracks `include_bytes!()` dependencies, so if the WASM file changes, Cargo will rebuild the host library. No manual cache invalidation needed.
 
 ## Key Files to Understand
 
 | File | Purpose |
 |------|---------|
-| `crates/conch/src/wasm_core.rs` | Main executor — loads WASM, runs scripts |
+| `crates/conch/src/wasm_core.rs` | Main executor — loads WASM, runs scripts via InstancePre |
 | `crates/conch/src/ffi.rs` | C FFI layer for Go integration |
+| `crates/conch/src/vfs.rs` | ContextFs and ContextProvider for virtual filesystem |
 | `crates/conch-mcp/src/lib.rs` | MCP server with `execute` tool |
 | `crates/conch-shell/src/lib.rs` | WASM module entry point |
 | `tests/go/conch.go` | Go bindings using purego |
@@ -159,7 +175,6 @@ Why mise over cargo?
 ## Cargo Features
 
 - `embedded-shell`: Embeds the pre-built WASM module in the library
-- `embedded-component`: Embeds a component model WASM (not fully implemented)
 
 ## Testing Notes
 
@@ -175,11 +190,22 @@ The `plans/` directory describes an ambitious design with:
 - Semantic search helpers (`ctx-search`)
 - Custom builtins via tree-sitter parser
 
-The current implementation is simpler:
-- Working brush-based shell execution
-- Basic resource limits
-- Go FFI bindings
-- No VFS integration yet (just standard WASI filesystem)
+The current implementation:
+- ✅ Working brush-based shell execution
+- ✅ Basic resource limits (CPU epochs, memory, output)
+- ✅ Go FFI bindings via purego
+- ✅ InstancePre for efficient per-call instantiation
+- ⏳ VFS integration (ContextFs implemented, not yet wired to WASM execution)
+
+## VFS Integration (Planned)
+
+The VFS will use WASI filesystem shadowing (like eryx):
+1. Shell compiles to `wasm32-wasip1` and uses standard WASI filesystem calls
+2. Host shadows `wasi:filesystem` interfaces with custom implementation
+3. Paths like `/ctx/self/tools/...` route to `ContextFs`
+4. Real paths (if needed) pass through to actual filesystem
+
+This allows the shell to use familiar filesystem operations while the host controls what's visible.
 
 ## Common Tasks
 
@@ -226,7 +252,8 @@ Configure in Claude Desktop (`~/Library/Application Support/Claude/claude_deskto
 ## Dependencies
 
 Key crates:
-- `wasmtime` (v41): WASM runtime
+- `wasmtime` (v41): WASM runtime with InstancePre support
+- `wasmtime-wasi`: WASI Preview 1 support
 - `brush-core`, `brush-builtins`: Bash shell implementation
 - `tokio`: Async runtime (single-threaded in WASM)
 

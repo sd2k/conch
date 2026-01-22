@@ -51,24 +51,16 @@ var (
 	lib     uintptr
 	libErr  error
 
-	// Function pointers - Component model executor
+	// Function pointers
 	conchLastError            func() uintptr
 	conchResultFree           func(uintptr)
-	conchHasEmbeddedComponent func() uint8
+	conchHasEmbeddedShell     func() uint8
 	conchExecutorNewEmbedded  func() uintptr
 	conchExecutorNew          func(uintptr) uintptr
 	conchExecutorNewFromBytes func(uintptr, uintptr) uintptr
 	conchExecutorFree         func(uintptr)
 	conchExecute              func(uintptr, uintptr) uintptr
-	conchExecuteWithStdin     func(uintptr, uintptr, uintptr, uintptr) uintptr
-
-	// Function pointers - Core executor (wasip1 / brush-based)
-	conchHasEmbeddedShell         func() uint8
-	conchCoreExecutorNewEmbedded  func() uintptr
-	conchCoreExecutorNew          func(uintptr) uintptr
-	conchCoreExecutorNewFromBytes func(uintptr, uintptr) uintptr
-	conchCoreExecutorFree         func(uintptr)
-	conchCoreExecute              func(uintptr, uintptr) uintptr
+	conchExecuteWithLimits    func(uintptr, uintptr, uint64, uint64, uint64, uint64) uintptr
 )
 
 // libName returns the platform-specific library name
@@ -139,28 +131,16 @@ func Init() error {
 		// Register functions
 		purego.RegisterLibFunc(&conchLastError, lib, "conch_last_error")
 		purego.RegisterLibFunc(&conchResultFree, lib, "conch_result_free")
-		purego.RegisterLibFunc(&conchHasEmbeddedComponent, lib, "conch_has_embedded_component")
+		purego.RegisterLibFunc(&conchHasEmbeddedShell, lib, "conch_has_embedded_shell")
 		purego.RegisterLibFunc(&conchExecutorNew, lib, "conch_executor_new")
 		purego.RegisterLibFunc(&conchExecutorNewFromBytes, lib, "conch_executor_new_from_bytes")
 		purego.RegisterLibFunc(&conchExecutorFree, lib, "conch_executor_free")
 		purego.RegisterLibFunc(&conchExecute, lib, "conch_execute")
-		purego.RegisterLibFunc(&conchExecuteWithStdin, lib, "conch_execute_with_stdin")
+		purego.RegisterLibFunc(&conchExecuteWithLimits, lib, "conch_execute_with_limits")
 
-		// Only register embedded executor if available (may not be exported if feature disabled)
-		if conchHasEmbeddedComponent() == 1 {
-			purego.RegisterLibFunc(&conchExecutorNewEmbedded, lib, "conch_executor_new_embedded")
-		}
-
-		// Register core executor functions
-		purego.RegisterLibFunc(&conchHasEmbeddedShell, lib, "conch_has_embedded_shell")
-		purego.RegisterLibFunc(&conchCoreExecutorNew, lib, "conch_core_executor_new")
-		purego.RegisterLibFunc(&conchCoreExecutorNewFromBytes, lib, "conch_core_executor_new_from_bytes")
-		purego.RegisterLibFunc(&conchCoreExecutorFree, lib, "conch_core_executor_free")
-		purego.RegisterLibFunc(&conchCoreExecute, lib, "conch_core_execute")
-
-		// Only register embedded shell if available
+		// Only register embedded executor if available
 		if conchHasEmbeddedShell() == 1 {
-			purego.RegisterLibFunc(&conchCoreExecutorNewEmbedded, lib, "conch_core_executor_new_embedded")
+			purego.RegisterLibFunc(&conchExecutorNewEmbedded, lib, "conch_executor_new_embedded")
 		}
 	})
 
@@ -180,21 +160,6 @@ func LastError() string {
 	}
 
 	return goString(ptr)
-}
-
-// ResultFree frees a ConchResult structure.
-// Safe to call with a zero/nil pointer.
-func ResultFree(result *ConchResult) {
-	if err := Init(); err != nil {
-		return
-	}
-
-	if result == nil {
-		conchResultFree(0)
-		return
-	}
-
-	conchResultFree(uintptr(unsafe.Pointer(result)))
 }
 
 // goString converts a C string pointer to a Go string
@@ -260,19 +225,11 @@ func LibraryPath() (string, error) {
 // ErrLibraryNotFound is returned when the conch library cannot be found
 var ErrLibraryNotFound = errors.New("conch library not found")
 
-// ErrNoEmbeddedComponent is returned when trying to use the embedded component
-// but the library was not built with the embedded-component feature
-var ErrNoEmbeddedComponent = errors.New("library was not built with embedded-component feature")
+// ErrNoEmbeddedShell is returned when trying to use the embedded shell
+// but the library was not built with the embedded-shell feature
+var ErrNoEmbeddedShell = errors.New("library was not built with embedded-shell feature")
 
-// HasEmbeddedComponent returns true if the library was built with the embedded component.
-func HasEmbeddedComponent() bool {
-	if err := Init(); err != nil {
-		return false
-	}
-	return conchHasEmbeddedComponent() == 1
-}
-
-// HasEmbeddedShell returns true if the library was built with the embedded shell (brush-based).
+// HasEmbeddedShell returns true if the library was built with the embedded shell module.
 func HasEmbeddedShell() bool {
 	if err := Init(); err != nil {
 		return false
@@ -280,43 +237,40 @@ func HasEmbeddedShell() bool {
 	return conchHasEmbeddedShell() == 1
 }
 
-// ErrNoEmbeddedShell is returned when trying to use the embedded shell
-// but the library was not built with the embedded-shell feature
-var ErrNoEmbeddedShell = errors.New("library was not built with embedded-shell feature")
+// ResourceLimits configures execution limits for shell scripts
+type ResourceLimits struct {
+	// MaxCPUMs is the maximum CPU time in milliseconds
+	MaxCPUMs uint64
+	// MaxMemoryBytes is the maximum memory in bytes
+	MaxMemoryBytes uint64
+	// MaxOutputBytes is the maximum output (stdout + stderr) in bytes
+	MaxOutputBytes uint64
+	// TimeoutMs is the wall-clock timeout in milliseconds
+	TimeoutMs uint64
+}
+
+// DefaultLimits returns sensible default resource limits
+func DefaultLimits() ResourceLimits {
+	return ResourceLimits{
+		MaxCPUMs:       5000,             // 5 seconds CPU
+		MaxMemoryBytes: 64 * 1024 * 1024, // 64 MB
+		MaxOutputBytes: 1024 * 1024,      // 1 MB output
+		TimeoutMs:      30000,            // 30 second timeout
+	}
+}
 
 // Executor wraps a ConchExecutor handle
 type Executor struct {
 	handle uintptr
 }
 
-// findComponent searches for the WASM component in common locations
-func findComponent() (string, error) {
-	_, thisFile, _, _ := runtime.Caller(0)
-	testDir := filepath.Dir(thisFile)
-	repoRoot := filepath.Join(testDir, "..", "..")
-
-	// Search paths in order of preference
-	searchPaths := []string{
-		filepath.Join(repoRoot, "target", "wasm32-unknown-unknown", "release", "conch_wasm.component.wasm"),
-		filepath.Join(repoRoot, "target", "wasm32-unknown-unknown", "debug", "conch_wasm.component.wasm"),
-	}
-
-	for _, path := range searchPaths {
-		if _, err := os.Stat(path); err == nil {
-			return path, nil
-		}
-	}
-
-	return "", fmt.Errorf("component not found in search paths: %v", searchPaths)
-}
-
-// NewExecutor creates a new shell executor from a component file path.
-func NewExecutor(componentPath string) (*Executor, error) {
+// NewExecutor creates a new shell executor from a WASM module file path.
+func NewExecutor(modulePath string) (*Executor, error) {
 	if err := Init(); err != nil {
 		return nil, err
 	}
 
-	cPath, err := cString(componentPath)
+	cPath, err := cString(modulePath)
 	if err != nil {
 		return nil, err
 	}
@@ -330,14 +284,14 @@ func NewExecutor(componentPath string) (*Executor, error) {
 	return &Executor{handle: handle}, nil
 }
 
-// NewExecutorFromBytes creates a new shell executor from component bytes.
+// NewExecutorFromBytes creates a new shell executor from WASM module bytes.
 func NewExecutorFromBytes(data []byte) (*Executor, error) {
 	if err := Init(); err != nil {
 		return nil, err
 	}
 
 	if len(data) == 0 {
-		return nil, errors.New("component data is empty")
+		return nil, errors.New("module data is empty")
 	}
 
 	handle := conchExecutorNewFromBytes(uintptr(unsafe.Pointer(&data[0])), uintptr(len(data)))
@@ -348,32 +302,15 @@ func NewExecutorFromBytes(data []byte) (*Executor, error) {
 	return &Executor{handle: handle}, nil
 }
 
-// NewExecutorDefault creates a new shell executor using the default component location.
-// If the library was built with embedded-component feature, uses that.
-// Otherwise, searches for the component file.
-func NewExecutorDefault() (*Executor, error) {
-	// Prefer embedded component if available
-	if HasEmbeddedComponent() {
-		return NewExecutorEmbedded()
-	}
-
-	// Fall back to file-based loading
-	path, err := findComponent()
-	if err != nil {
-		return nil, err
-	}
-	return NewExecutor(path)
-}
-
-// NewExecutorEmbedded creates a new shell executor using the embedded WASM component.
-// Returns an error if the library was not built with the embedded-component feature.
+// NewExecutorEmbedded creates a new shell executor using the embedded WASM module.
+// Returns an error if the library was not built with the embedded-shell feature.
 func NewExecutorEmbedded() (*Executor, error) {
 	if err := Init(); err != nil {
 		return nil, err
 	}
 
-	if !HasEmbeddedComponent() {
-		return nil, ErrNoEmbeddedComponent
+	if !HasEmbeddedShell() {
+		return nil, ErrNoEmbeddedShell
 	}
 
 	handle := conchExecutorNewEmbedded()
@@ -392,13 +329,13 @@ func (e *Executor) Close() {
 	}
 }
 
-// Execute runs a shell script and returns the result.
+// Execute runs a shell script with default resource limits and returns the result.
 func (e *Executor) Execute(script string) (*Result, error) {
-	return e.ExecuteWithStdin(script, nil)
+	return e.ExecuteWithLimits(script, DefaultLimits())
 }
 
-// ExecuteWithStdin runs a shell script with stdin input.
-func (e *Executor) ExecuteWithStdin(script string, stdin []byte) (*Result, error) {
+// ExecuteWithLimits runs a shell script with custom resource limits.
+func (e *Executor) ExecuteWithLimits(script string, limits ResourceLimits) (*Result, error) {
 	if e.handle == 0 {
 		return nil, errors.New("executor is closed")
 	}
@@ -410,14 +347,17 @@ func (e *Executor) ExecuteWithStdin(script string, stdin []byte) (*Result, error
 	defer freeString(cScript)
 
 	var resultPtr uintptr
-	if len(stdin) == 0 {
+	if limits == DefaultLimits() {
+		// Use the simpler execute function for default limits
 		resultPtr = conchExecute(e.handle, cScript)
 	} else {
-		resultPtr = conchExecuteWithStdin(
+		resultPtr = conchExecuteWithLimits(
 			e.handle,
 			cScript,
-			uintptr(unsafe.Pointer(&stdin[0])),
-			uintptr(len(stdin)),
+			limits.MaxCPUMs,
+			limits.MaxMemoryBytes,
+			limits.MaxOutputBytes,
+			limits.TimeoutMs,
 		)
 	}
 
@@ -451,110 +391,4 @@ func cString(s string) (uintptr, error) {
 // freeString is a no-op since we use Go-allocated memory
 func freeString(ptr uintptr) {
 	// Go GC handles this
-}
-
-// ============================================================================
-// CoreExecutor - brush-based wasip1 shell executor
-// ============================================================================
-
-// CoreExecutor wraps a ConchCoreExecutor handle (brush-based shell)
-type CoreExecutor struct {
-	handle uintptr
-}
-
-// NewCoreExecutor creates a new core shell executor from a module file path.
-func NewCoreExecutor(modulePath string) (*CoreExecutor, error) {
-	if err := Init(); err != nil {
-		return nil, err
-	}
-
-	cPath, err := cString(modulePath)
-	if err != nil {
-		return nil, err
-	}
-	defer freeString(cPath)
-
-	handle := conchCoreExecutorNew(cPath)
-	if handle == 0 {
-		return nil, fmt.Errorf("failed to create core executor: %s", LastError())
-	}
-
-	return &CoreExecutor{handle: handle}, nil
-}
-
-// NewCoreExecutorFromBytes creates a new core shell executor from module bytes.
-func NewCoreExecutorFromBytes(data []byte) (*CoreExecutor, error) {
-	if err := Init(); err != nil {
-		return nil, err
-	}
-
-	if len(data) == 0 {
-		return nil, errors.New("module data is empty")
-	}
-
-	handle := conchCoreExecutorNewFromBytes(uintptr(unsafe.Pointer(&data[0])), uintptr(len(data)))
-	if handle == 0 {
-		return nil, fmt.Errorf("failed to create core executor: %s", LastError())
-	}
-
-	return &CoreExecutor{handle: handle}, nil
-}
-
-// NewCoreExecutorEmbedded creates a new core shell executor using the embedded WASM module.
-// Returns an error if the library was not built with the embedded-shell feature.
-func NewCoreExecutorEmbedded() (*CoreExecutor, error) {
-	if err := Init(); err != nil {
-		return nil, err
-	}
-
-	if !HasEmbeddedShell() {
-		return nil, ErrNoEmbeddedShell
-	}
-
-	handle := conchCoreExecutorNewEmbedded()
-	if handle == 0 {
-		return nil, fmt.Errorf("failed to create core executor: %s", LastError())
-	}
-
-	return &CoreExecutor{handle: handle}, nil
-}
-
-// Close frees the core executor resources.
-func (e *CoreExecutor) Close() {
-	if e.handle != 0 {
-		conchCoreExecutorFree(e.handle)
-		e.handle = 0
-	}
-}
-
-// Execute runs a shell script and returns the result.
-func (e *CoreExecutor) Execute(script string) (*Result, error) {
-	if e.handle == 0 {
-		return nil, errors.New("executor is closed")
-	}
-
-	cScript, err := cString(script)
-	if err != nil {
-		return nil, err
-	}
-	defer freeString(cScript)
-
-	resultPtr := conchCoreExecute(e.handle, cScript)
-	if resultPtr == 0 {
-		return nil, fmt.Errorf("execution failed: %s", LastError())
-	}
-
-	// Convert to Go result
-	cResult := (*ConchResult)(unsafe.Pointer(resultPtr))
-	result := &Result{
-		ExitCode:  int(cResult.ExitCode),
-		Stdout:    goBytes(cResult.StdoutData, int(cResult.StdoutLen)),
-		Stderr:    goBytes(cResult.StderrData, int(cResult.StderrLen)),
-		Truncated: cResult.Truncated != 0,
-	}
-
-	// Free the C result
-	conchResultFree(resultPtr)
-
-	return result, nil
 }

@@ -1,16 +1,12 @@
 [tools]
-# Profile "default" includes rustc, rust-std, cargo, rust-docs, rustfmt, and clippy
 rust = "1.92"
-
-# Commented out - cargo-binstall can't handle edition 2024 in these crates yet
-# [tools."cargo:cargo-nextest"]
-# version = "0.9"
-
-# [tools."cargo:cargo-rail"]
-# version = "0.8"
 
 [tools."cargo:wasm-tools"]
 version = "1"
+
+# =============================================================================
+# Core development tasks
+# =============================================================================
 
 [tasks.check]
 description = "Run cargo check"
@@ -40,14 +36,6 @@ run = "cargo fmt --all"
 description = "Check code formatting"
 run = "cargo fmt --all -- --check"
 
-[tasks.doc]
-description = "Generate documentation"
-run = "cargo doc --workspace --no-deps"
-
-[tasks.doc-open]
-description = "Generate and open documentation"
-run = "cargo doc --workspace --no-deps --open"
-
 [tasks.ci]
 description = "Run all CI checks"
 depends = ["fmt-check", "lint", "test"]
@@ -56,7 +44,9 @@ depends = ["fmt-check", "lint", "test"]
 description = "Clean build artifacts"
 run = "cargo clean"
 
+# =============================================================================
 # WASM shell build tasks
+# =============================================================================
 
 [tasks.wasm-target]
 description = "Install wasm32-wasip1 target"
@@ -65,8 +55,6 @@ run = "rustup target add wasm32-wasip1"
 [tasks.wasm-build]
 description = "Build WASM shell module"
 depends = ["wasm-target"]
-sources = ["crates/conch-shell/src/**/*.rs", "crates/conch-shell/Cargo.toml"]
-outputs = ["target/wasm32-wasip1/release/conch_shell.wasm"]
 run = "cargo build -p conch-shell --target wasm32-wasip1 --release"
 
 [tasks.build-embedded]
@@ -79,6 +67,10 @@ description = "Build all crates in release mode (with embedded shell)"
 depends = ["wasm-build"]
 run = "cargo build --workspace --features embedded-shell --release"
 
+# =============================================================================
+# Test tasks
+# =============================================================================
+
 [tasks.test-go]
 description = "Run Go FFI tests"
 depends = ["build-embedded"]
@@ -89,30 +81,36 @@ run = "go test -v ./..."
 description = "Run all tests (Rust + Go)"
 depends = ["test", "test-go"]
 
-[tasks.unify]
-description = "Unify workspace dependencies and prune dead features"
-run = "cargo rail unify"
-
-[tasks.unify-check]
-description = "Check for dependency drift (CI)"
-run = "cargo rail unify --check"
-
-[tasks.affected]
-description = "List affected crates"
-run = "cargo rail affected"
-
-[tasks.msrv]
-description = "Check compilation on minimum supported Rust version"
-run = "cargo +1.85 check --workspace"
-
+# =============================================================================
 # MCP server tasks
+# =============================================================================
 
 [tasks.build-mcp]
 description = "Build the MCP server binary"
 depends = ["wasm-build"]
-run = "cargo build -p conch-mcp --release"
+run = "cargo build -p conch-mcp --features conch/embedded-shell --release"
 
 [tasks.run-mcp]
 description = "Run the MCP server (stdio transport)"
 depends = ["build-mcp"]
 run = "./target/release/conch-mcp"
+
+# =============================================================================
+# Documentation
+# =============================================================================
+
+[tasks.doc]
+description = "Generate documentation"
+run = "cargo doc --workspace --no-deps"
+
+[tasks.doc-open]
+description = "Generate and open documentation"
+run = "cargo doc --workspace --no-deps --open"
+
+# =============================================================================
+# Maintenance
+# =============================================================================
+
+[tasks.msrv]
+description = "Check compilation on minimum supported Rust version"
+run = "cargo +1.85 check --workspace"
