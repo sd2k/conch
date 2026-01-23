@@ -9,7 +9,6 @@ use tokio::sync::Semaphore;
 
 use crate::executor::ComponentShellExecutor;
 use crate::limits::ResourceLimits;
-use crate::vfs::{AccessPolicy, ContextFs, ContextProvider};
 
 /// Errors that can occur during shell execution
 #[derive(Debug, Error)]
@@ -29,81 +28,6 @@ pub enum RuntimeError {
     /// IO error
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
-}
-
-/// Execution context for the shell
-#[derive(Clone)]
-pub struct ExecutionContext {
-    /// ID of the current agent
-    pub agent_id: String,
-    /// ID of the parent agent, if any
-    pub parent_agent_id: Option<String>,
-    /// IDs of child agents
-    pub child_agent_ids: Vec<String>,
-    /// ID of the shared investigation, if any
-    pub investigation_id: Option<String>,
-    /// Provider for context data (tool calls, messages, etc.)
-    pub provider: Arc<dyn ContextProvider>,
-}
-
-impl fmt::Debug for ExecutionContext {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ExecutionContext")
-            .field("agent_id", &self.agent_id)
-            .field("parent_agent_id", &self.parent_agent_id)
-            .field("child_agent_ids", &self.child_agent_ids)
-            .field("investigation_id", &self.investigation_id)
-            .field("provider", &"<dyn ContextProvider>")
-            .finish()
-    }
-}
-
-impl ExecutionContext {
-    /// Create a new execution context for an agent
-    pub fn new(agent_id: impl Into<String>, provider: Arc<dyn ContextProvider>) -> Self {
-        Self {
-            agent_id: agent_id.into(),
-            parent_agent_id: None,
-            child_agent_ids: Vec::new(),
-            investigation_id: None,
-            provider,
-        }
-    }
-
-    /// Set the parent agent ID
-    pub fn with_parent(mut self, parent_id: impl Into<String>) -> Self {
-        self.parent_agent_id = Some(parent_id.into());
-        self
-    }
-
-    /// Set the child agent IDs
-    pub fn with_children(mut self, children: Vec<String>) -> Self {
-        self.child_agent_ids = children;
-        self
-    }
-
-    /// Set the investigation ID for shared context
-    pub fn with_investigation(mut self, investigation_id: impl Into<String>) -> Self {
-        self.investigation_id = Some(investigation_id.into());
-        self
-    }
-
-    /// Build an access policy from this context
-    pub fn build_policy(&self) -> AccessPolicy {
-        AccessPolicy {
-            agent_id: self.agent_id.clone(),
-            parent_agent_id: self.parent_agent_id.clone(),
-            child_agent_ids: self.child_agent_ids.clone(),
-            investigation_id: self.investigation_id.clone(),
-            can_read_parent_tools: true,
-            can_read_parent_messages: false,
-        }
-    }
-
-    /// Build a virtual filesystem from this context
-    pub fn build_fs(&self) -> ContextFs {
-        ContextFs::new(self.provider.clone(), self.build_policy())
-    }
 }
 
 /// Statistics about shell execution
@@ -135,7 +59,10 @@ pub struct ExecutionResult {
 /// Shell execution engine
 ///
 /// Wraps the ComponentShellExecutor to run shell scripts in a WASM sandbox.
-/// Provides concurrency limiting and execution context management.
+/// Provides concurrency limiting for executing multiple scripts.
+///
+/// For more advanced VFS usage with hybrid filesystem mounts, use the
+/// [`Shell`](crate::Shell) API instead.
 pub struct Conch {
     max_concurrent: usize,
     semaphore: Arc<Semaphore>,
@@ -187,35 +114,11 @@ impl Conch {
         })
     }
 
-    /// Execute a shell script with the given execution context.
+    /// Execute a shell script.
     ///
-    /// The execution context provides agent identity and access to the virtual
-    /// filesystem (VFS). Note: VFS integration is not yet complete - currently
-    /// only standard WASI filesystem is available.
+    /// This is a simple API for running shell scripts without VFS.
+    /// For VFS support with hybrid filesystem mounts, use [`Shell`](crate::Shell).
     pub async fn execute(
-        &self,
-        script: &str,
-        context: ExecutionContext,
-        limits: ResourceLimits,
-    ) -> Result<ExecutionResult, RuntimeError> {
-        let _permit = self
-            .semaphore
-            .acquire()
-            .await
-            .map_err(|_| RuntimeError::Semaphore)?;
-
-        // Build the virtual filesystem (for future use)
-        // TODO: Wire up ContextFs to the WASM executor's WASI layer
-        let _vfs = context.build_fs();
-
-        // Execute via the core shell executor
-        self.executor.execute(script, &limits).await
-    }
-
-    /// Execute a shell script without an execution context.
-    ///
-    /// This is a simpler API when you don't need agent context or VFS.
-    pub async fn execute_simple(
         &self,
         script: &str,
         limits: ResourceLimits,
@@ -239,7 +142,6 @@ impl Conch {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::vfs::MockContextProvider;
 
     fn get_test_shell() -> Option<Conch> {
         // Try embedded first
@@ -277,16 +179,13 @@ mod tests {
     async fn test_basic_execution() {
         let Some(shell) = get_test_shell() else {
             eprintln!(
-                "Skipping test: module not built. Run: cargo build -p conch-shell --target wasm32-wasip1 --release"
+                "Skipping test: module not built. Run: cargo build -p conch-shell --target wasm32-wasip2 --release"
             );
             return;
         };
 
-        let provider = Arc::new(MockContextProvider::new());
-        let context = ExecutionContext::new("test-agent", provider);
-
         let result = shell
-            .execute("echo hello", context, ResourceLimits::default())
+            .execute("echo hello", ResourceLimits::default())
             .await
             .unwrap();
 
@@ -300,7 +199,7 @@ mod tests {
         };
 
         let result = shell
-            .execute_simple("echo hello world", ResourceLimits::default())
+            .execute("echo hello world", ResourceLimits::default())
             .await
             .unwrap();
 
@@ -314,7 +213,7 @@ mod tests {
         };
 
         let result = shell
-            .execute_simple("echo hello | cat", ResourceLimits::default())
+            .execute("echo hello | cat", ResourceLimits::default())
             .await
             .unwrap();
 
@@ -328,7 +227,7 @@ mod tests {
         };
 
         let result = shell
-            .execute_simple("false", ResourceLimits::default())
+            .execute("false", ResourceLimits::default())
             .await
             .unwrap();
 

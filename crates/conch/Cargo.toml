@@ -37,5 +37,24 @@ tracing.workspace = true
 [lib]
 crate-type = ["lib", "staticlib", "cdylib"]
 
+[dev-dependencies]
+async-trait.workspace = true
+
+[[example]]
+name = "basic"
+required-features = ["embedded-shell"]
+
+[[example]]
+name = "vfs_mounts"
+required-features = ["embedded-shell"]
+
+[[example]]
+name = "low_level"
+required-features = ["embedded-shell"]
+
+[[example]]
+name = "custom_storage"
+required-features = ["embedded-shell"]
+
 [lints]
 workspace = true

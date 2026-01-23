@@ -92,6 +92,9 @@ impl builtins::SimpleCommand for GrepCommand {
             writeln!(context.stdout(), "{}", match_count)?;
         }
 
+        // Ensure output is flushed
+        context.stdout().flush()?;
+
         let exit_code = if matched { 0 } else { 1 };
         Ok(ExecutionResult::new(exit_code))
     }

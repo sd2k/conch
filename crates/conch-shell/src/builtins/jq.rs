@@ -140,6 +140,9 @@ impl builtins::SimpleCommand for JqCommand {
             }
         }
 
+        // Ensure output is flushed
+        context.stdout().flush()?;
+
         Ok(ExecutionResult::new(last_code))
     }
 }
