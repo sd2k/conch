@@ -113,4 +113,4 @@ run = "cargo doc --workspace --no-deps --open"
 
 [tasks.msrv]
 description = "Check compilation on minimum supported Rust version"
-run = "cargo +1.85 check --workspace"
+run = "cargo +1.90 check --workspace"
