@@ -211,15 +211,29 @@ impl ComponentShellExecutor {
         // Cancel the timeout task
         epoch_handle.abort();
 
+        // Handle the result - the WIT interface returns Result<exit_code, error_message>
+        let exit_code = match result {
+            Ok(code) => code,
+            Err(error_msg) => {
+                // Shell initialization/execution error - return as stderr
+                return Ok(ExecutionResult {
+                    exit_code: 1,
+                    stdout: Vec::new(),
+                    stderr: error_msg.into_bytes(),
+                    truncated: false,
+                    stats: crate::runtime::ExecutionStats::default(),
+                });
+            }
+        };
+
         // Get captured output from the WASI pipes.
         // The shell writes to WASI stdout/stderr which we intercept via MemoryOutputPipe.
-        // The WIT result's stdout/stderr fields are unused (always empty).
         let state = store.data();
         let stdout = state.stdout();
         let stderr = state.stderr();
 
         Ok(ExecutionResult {
-            exit_code: result.exit_code,
+            exit_code,
             stdout,
             stderr,
             truncated: false,

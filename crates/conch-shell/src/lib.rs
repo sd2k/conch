@@ -22,22 +22,19 @@ wit_bindgen::generate!({
 struct ShellComponent;
 
 impl Guest for ShellComponent {
-    /// Execute a shell script and return the result.
-    fn execute(script: String) -> ExecuteResult {
+    /// Execute a shell script and return the exit code.
+    ///
+    /// Returns Ok(exit_code) on success, or Err(message) if the shell
+    /// itself failed to initialize. Note that script errors (like
+    /// "command not found") still return Ok with a non-zero exit code.
+    ///
+    /// stdout/stderr are written to WASI pipes, not returned here.
+    fn execute(script: String) -> Result<i32, String> {
         // Build tokio runtime (single-threaded for WASM)
-        let rt = match tokio::runtime::Builder::new_current_thread()
+        let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-        {
-            Ok(rt) => rt,
-            Err(e) => {
-                return ExecuteResult {
-                    exit_code: 1,
-                    stdout: Vec::new(),
-                    stderr: format!("failed to create runtime: {}\n", e).into_bytes(),
-                };
-            }
-        };
+            .map_err(|e| format!("failed to create runtime: {}", e))?;
 
         // Execute the script
         rt.block_on(execute_script_async(&script))
@@ -45,45 +42,26 @@ impl Guest for ShellComponent {
 }
 
 /// Async implementation of script execution.
-async fn execute_script_async(script: &str) -> ExecuteResult {
+async fn execute_script_async(script: &str) -> Result<i32, String> {
     // Get default builtins and add our custom ones
     let mut shell_builtins = brush_builtins::default_builtins(brush_builtins::BuiltinSet::BashMode);
     builtins::register_builtins(&mut shell_builtins);
 
-    let shell_result = Shell::builder().builtins(shell_builtins).build().await;
-
-    let mut shell = match shell_result {
-        Ok(s) => s,
-        Err(e) => {
-            return ExecuteResult {
-                exit_code: 1,
-                stdout: Vec::new(),
-                stderr: format!("failed to create shell: {}\n", e).into_bytes(),
-            };
-        }
-    };
+    let mut shell = Shell::builder()
+        .builtins(shell_builtins)
+        .build()
+        .await
+        .map_err(|e| format!("failed to create shell: {}", e))?;
 
     let source_info = SourceInfo::default();
     let exec_params = ExecutionParameters::default();
 
-    match shell.run_string(script, &source_info, &exec_params).await {
-        Ok(result) => {
-            let exit_code = i32::from(u8::from(result.exit_code));
-            // Note: stdout/stderr are captured by the host via WASI pipes,
-            // not returned in this result. The shell writes directly to
-            // WASI stdout/stderr which the host intercepts.
-            ExecuteResult {
-                exit_code,
-                stdout: Vec::new(),
-                stderr: Vec::new(),
-            }
-        }
-        Err(e) => ExecuteResult {
-            exit_code: 1,
-            stdout: Vec::new(),
-            stderr: format!("execution error: {}\n", e).into_bytes(),
-        },
-    }
+    let result = shell
+        .run_string(script, &source_info, &exec_params)
+        .await
+        .map_err(|e| format!("execution error: {}", e))?;
+
+    Ok(i32::from(u8::from(result.exit_code)))
 }
 
 // Export the component.
@@ -97,7 +75,7 @@ export!(ShellComponent);
 mod tests {
     use super::*;
 
-    fn execute_test(script: &str) -> ExecuteResult {
+    fn execute_test(script: &str) -> Result<i32, String> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -108,43 +86,43 @@ mod tests {
     #[test]
     fn test_echo() {
         let result = execute_test("echo hello");
-        assert_eq!(result.exit_code, 0);
+        assert_eq!(result, Ok(0));
     }
 
     #[test]
     fn test_true() {
         let result = execute_test("true");
-        assert_eq!(result.exit_code, 0);
+        assert_eq!(result, Ok(0));
     }
 
     #[test]
     fn test_false() {
         let result = execute_test("false");
-        assert_eq!(result.exit_code, 1);
+        assert_eq!(result, Ok(1));
     }
 
     #[test]
     fn test_variable() {
         let result = execute_test("x=hello; echo $x");
-        assert_eq!(result.exit_code, 0);
+        assert_eq!(result, Ok(0));
     }
 
     #[test]
     fn test_arithmetic() {
         let result = execute_test("echo $((2 + 2))");
-        assert_eq!(result.exit_code, 0);
+        assert_eq!(result, Ok(0));
     }
 
     #[test]
     fn test_conditional() {
         let result = execute_test("if true; then echo yes; fi");
-        assert_eq!(result.exit_code, 0);
+        assert_eq!(result, Ok(0));
     }
 
     #[test]
     fn test_loop() {
         let result = execute_test("for i in 1 2 3; do echo $i; done");
-        assert_eq!(result.exit_code, 0);
+        assert_eq!(result, Ok(0));
     }
 }
 
@@ -152,7 +130,7 @@ mod tests {
 mod pipe_tests {
     use super::*;
 
-    fn execute_test(script: &str) -> ExecuteResult {
+    fn execute_test(script: &str) -> Result<i32, String> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -163,11 +141,6 @@ mod pipe_tests {
     #[test]
     fn test_simple_pipe() {
         let result = execute_test("echo hello | cat");
-        assert_eq!(
-            result.exit_code,
-            0,
-            "stderr: {}",
-            String::from_utf8_lossy(&result.stderr)
-        );
+        assert_eq!(result, Ok(0), "error: {:?}", result);
     }
 }
