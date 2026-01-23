@@ -155,7 +155,7 @@ Configure in Claude Desktop:
 
 ### Prerequisites
 
-- Rust 1.85+ (1.92 recommended)
+- Rust 1.90+ (1.92 recommended)
 - [mise](https://mise.jdx.dev/) for task running (optional but recommended)
 
 ### Build Commands
