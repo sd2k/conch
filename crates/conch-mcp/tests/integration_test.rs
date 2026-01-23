@@ -4,11 +4,13 @@
 //! over stdio using JSON-RPC, catching issues like nested tokio runtimes
 //! that unit tests would miss.
 
+use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use serde_json::{Value, json};
+use tempfile::TempDir;
 
 /// Helper to spawn the MCP server process
 struct McpServerProcess {
@@ -17,10 +19,15 @@ struct McpServerProcess {
 
 impl McpServerProcess {
     fn spawn() -> Self {
+        Self::spawn_with_args(&[])
+    }
+
+    fn spawn_with_args(args: &[&str]) -> Self {
         // Find the binary - try release first, then debug
         let binary = Self::find_binary();
 
         let child = Command::new(&binary)
+            .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -512,5 +519,140 @@ fn test_mcp_isolation_between_executions() {
         text2.contains("unset"),
         "Variable should not persist between executions, got: {}",
         text2
+    );
+}
+
+#[test]
+fn test_mcp_mount_readonly() {
+    // Create a temp directory with a test file
+    let temp_dir = TempDir::new().expect("create temp dir");
+    let test_file = temp_dir.path().join("test.txt");
+    fs::write(&test_file, "hello from mounted file").expect("write test file");
+
+    // Spawn server with a readonly mount
+    let mount_arg = format!("/data:{}:ro", temp_dir.path().display());
+    let mut server = McpServerProcess::spawn_with_args(&["--mount", &mount_arg]);
+    initialize(&mut server);
+
+    // Read the mounted file
+    let call_tool_request = json!({
+        "jsonrpc": "2.0",
+        "id": 300,
+        "method": "tools/call",
+        "params": {
+            "name": "execute",
+            "arguments": {
+                "command": "cat /data/test.txt"
+            }
+        }
+    });
+
+    let response = server.request(call_tool_request);
+
+    assert!(
+        response.get("result").is_some(),
+        "Expected result, got: {}",
+        response
+    );
+
+    let text = response["result"]["content"][0]["text"]
+        .as_str()
+        .expect("text content");
+    assert!(
+        text.contains("hello from mounted file"),
+        "Expected file content, got: {}",
+        text
+    );
+}
+
+#[test]
+fn test_mcp_mount_readwrite() {
+    // Create a temp directory
+    let temp_dir = TempDir::new().expect("create temp dir");
+
+    // Spawn server with a readwrite mount
+    let mount_arg = format!("/workspace:{}:rw", temp_dir.path().display());
+    let mut server = McpServerProcess::spawn_with_args(&["--mount", &mount_arg]);
+    initialize(&mut server);
+
+    // Write a file to the mounted directory
+    let call_tool_request = json!({
+        "jsonrpc": "2.0",
+        "id": 400,
+        "method": "tools/call",
+        "params": {
+            "name": "execute",
+            "arguments": {
+                "command": "echo 'written by shell' > /workspace/output.txt && cat /workspace/output.txt"
+            }
+        }
+    });
+
+    let response = server.request(call_tool_request);
+
+    assert!(
+        response.get("result").is_some(),
+        "Expected result, got: {}",
+        response
+    );
+
+    let text = response["result"]["content"][0]["text"]
+        .as_str()
+        .expect("text content");
+    assert!(
+        text.contains("written by shell"),
+        "Expected written content, got: {}",
+        text
+    );
+
+    // Verify the file was actually written to the host filesystem
+    let written_file = temp_dir.path().join("output.txt");
+    assert!(
+        written_file.exists(),
+        "File should exist on host filesystem"
+    );
+
+    let content = fs::read_to_string(&written_file).expect("read written file");
+    assert!(
+        content.contains("written by shell"),
+        "Host file should contain shell output, got: {}",
+        content
+    );
+}
+
+#[test]
+fn test_mcp_tool_description_includes_mounts() {
+    // Create a temp directory
+    let temp_dir = TempDir::new().expect("create temp dir");
+
+    // Spawn server with a mount
+    let mount_arg = format!("/mydata:{}:ro", temp_dir.path().display());
+    let mut server = McpServerProcess::spawn_with_args(&["--mount", &mount_arg]);
+    initialize(&mut server);
+
+    // List tools and check description
+    let list_tools_request = json!({
+        "jsonrpc": "2.0",
+        "id": 500,
+        "method": "tools/list",
+        "params": {}
+    });
+
+    let response = server.request(list_tools_request);
+
+    let tools = response["result"]["tools"].as_array().expect("tools array");
+    let execute_tool = tools.iter().find(|t| t["name"] == "execute").unwrap();
+
+    let description = execute_tool["description"].as_str().expect("description");
+
+    assert!(
+        description.contains("/mydata"),
+        "Tool description should mention mount path, got: {}",
+        description
+    );
+    assert!(
+        description.contains("read-only"),
+        "Tool description should mention mount mode, got: {}",
+        description
     );
 }
