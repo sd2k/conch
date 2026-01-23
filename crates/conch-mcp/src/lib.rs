@@ -2,11 +2,32 @@
 //!
 //! An MCP server that exposes Conch sandboxed shell execution as a tool.
 //! This allows AI agents to execute shell commands in a secure WASM sandbox.
+//!
+//! # Mount Configuration
+//!
+//! The server can be configured with filesystem mounts that allow the sandboxed
+//! shell to access specific host directories:
+//!
+//! ```rust,ignore
+//! use conch_mcp::{ConchServer, MountConfig};
+//! use std::path::PathBuf;
+//!
+//! let mounts = vec![
+//!     MountConfig {
+//!         guest_path: "/data".to_string(),
+//!         host_path: PathBuf::from("/home/user/data"),
+//!         readonly: true,
+//!     },
+//! ];
+//!
+//! let server = ConchServer::new(4, mounts)?;
+//! ```
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use conch::{Conch, ResourceLimits};
+use conch::{InMemoryStorage, Mount, ResourceLimits, Shell};
 use rmcp::{
     ErrorData as McpError, ServerHandler,
     model::*,
@@ -14,6 +35,18 @@ use rmcp::{
     service::{RequestContext, RoleServer},
 };
 use serde::{Deserialize, Serialize};
+use tokio::sync::Semaphore;
+
+/// Configuration for a filesystem mount.
+#[derive(Debug, Clone)]
+pub struct MountConfig {
+    /// Path visible inside the shell (e.g., "/data")
+    pub guest_path: String,
+    /// Real filesystem path to mount
+    pub host_path: PathBuf,
+    /// Whether the mount is read-only
+    pub readonly: bool,
+}
 
 /// Parameters for the shell execution tool
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -36,14 +69,27 @@ pub struct ExecuteParams {
 }
 
 /// MCP Server that provides sandboxed shell execution via Conch
-#[derive(Clone)]
 pub struct ConchServer {
-    conch: Arc<Conch>,
+    shell: Arc<Shell<InMemoryStorage>>,
+    semaphore: Arc<Semaphore>,
+    mount_descriptions: Vec<String>,
+}
+
+impl Clone for ConchServer {
+    fn clone(&self) -> Self {
+        Self {
+            shell: Arc::clone(&self.shell),
+            semaphore: Arc::clone(&self.semaphore),
+            mount_descriptions: self.mount_descriptions.clone(),
+        }
+    }
 }
 
 impl std::fmt::Debug for ConchServer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ConchServer").finish_non_exhaustive()
+        f.debug_struct("ConchServer")
+            .field("mounts", &self.mount_descriptions)
+            .finish_non_exhaustive()
     }
 }
 
@@ -52,15 +98,54 @@ impl ConchServer {
     ///
     /// # Arguments
     /// * `max_concurrent` - Maximum number of concurrent shell executions
-    pub fn new(max_concurrent: usize) -> Result<Self, conch::RuntimeError> {
-        let conch = Conch::embedded(max_concurrent)?;
+    /// * `mounts` - Filesystem directories to mount into the sandbox
+    pub fn new(
+        max_concurrent: usize,
+        mounts: Vec<MountConfig>,
+    ) -> Result<Self, conch::RuntimeError> {
+        let mut builder = Shell::builder();
+
+        // Collect mount descriptions for the tool description
+        let mut mount_descriptions = Vec::new();
+
+        // Add configured mounts
+        for mount in &mounts {
+            let perms = if mount.readonly {
+                Mount::readonly()
+            } else {
+                Mount::readwrite()
+            };
+            builder = builder.mount(&mount.guest_path, &mount.host_path, perms);
+
+            mount_descriptions.push(format!(
+                "{} ({})",
+                mount.guest_path,
+                if mount.readonly {
+                    "read-only"
+                } else {
+                    "read-write"
+                }
+            ));
+        }
+
+        let shell = builder.build()?;
+
         Ok(Self {
-            conch: Arc::new(conch),
+            shell: Arc::new(shell),
+            semaphore: Arc::new(Semaphore::new(max_concurrent)),
+            mount_descriptions,
         })
     }
 
     /// Execute a shell command in the Conch sandbox.
     async fn execute_command(&self, params: ExecuteParams) -> Result<CallToolResult, McpError> {
+        // Acquire semaphore permit for concurrency limiting
+        let _permit = self
+            .semaphore
+            .acquire()
+            .await
+            .map_err(|_| McpError::internal_error("Semaphore closed", None))?;
+
         let limits = ResourceLimits {
             max_cpu_ms: params.max_cpu_ms.unwrap_or(5000),
             max_memory_bytes: params.max_memory_bytes.unwrap_or(64 * 1024 * 1024),
@@ -69,8 +154,8 @@ impl ConchServer {
         };
 
         let result = self
-            .conch
-            .execute(&params.command, limits)
+            .shell
+            .execute(&params.command, &limits)
             .await
             .map_err(|e| McpError::internal_error(format!("Execution error: {}", e), None))?;
 
@@ -112,16 +197,28 @@ impl ConchServer {
             _ => Arc::new(serde_json::Map::new()),
         };
 
+        // Build description including mount info
+        let mut description = String::from(
+            "Execute a shell command in a secure WASM sandbox. Supports bash-compatible \
+            syntax including pipes, redirects, and common utilities like cat, grep, head, \
+            tail, jq, etc.",
+        );
+
+        if !self.mount_descriptions.is_empty() {
+            description.push_str("\n\nAvailable filesystem mounts:\n");
+            for mount_desc in &self.mount_descriptions {
+                description.push_str(&format!("  - {}\n", mount_desc));
+            }
+        } else {
+            description.push_str(
+                " The sandbox has no filesystem access beyond the virtual /scratch directory.",
+            );
+        }
+
         Tool {
             name: "execute".into(),
             title: Some("Execute Shell Command".into()),
-            description: Some(
-                "Execute a shell command in a secure WASM sandbox. Supports bash-compatible \
-                syntax including pipes, redirects, and common utilities like cat, grep, head, \
-                tail, etc. The sandbox has strict resource limits and no network or filesystem \
-                access beyond what's explicitly provided."
-                    .into(),
-            ),
+            description: Some(description.into()),
             input_schema,
             output_schema: None,
             annotations: None,
@@ -133,17 +230,25 @@ impl ConchServer {
 
 impl ServerHandler for ConchServer {
     fn get_info(&self) -> ServerInfo {
+        let mut instructions = String::from(
+            "Conch provides sandboxed shell execution in a WASM-based bash-compatible environment. \
+            Use the 'execute' tool to run shell commands safely. The sandbox supports common utilities \
+            like echo, cat, grep, head, tail, wc, sort, uniq, jq, and more. Commands run with strict \
+            resource limits.",
+        );
+
+        if !self.mount_descriptions.is_empty() {
+            instructions.push_str("\n\nFilesystem mounts available:\n");
+            for mount_desc in &self.mount_descriptions {
+                instructions.push_str(&format!("  - {}\n", mount_desc));
+            }
+        }
+
         ServerInfo {
             protocol_version: ProtocolVersion::LATEST,
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             server_info: Implementation::from_build_env(),
-            instructions: Some(
-                "Conch provides sandboxed shell execution in a WASM-based bash-compatible environment. \
-                Use the 'execute' tool to run shell commands safely. The sandbox supports common utilities \
-                like echo, cat, grep, head, tail, wc, sort, uniq, and more. Commands run with strict \
-                resource limits and have no network access."
-                    .into(),
-            ),
+            instructions: Some(instructions.into()),
         }
     }
 
@@ -210,5 +315,16 @@ mod tests {
         assert_eq!(params.command, "echo hello");
         assert_eq!(params.max_cpu_ms, Some(1000));
         assert_eq!(params.timeout_ms, Some(5000));
+    }
+
+    #[test]
+    fn test_mount_config() {
+        let mount = MountConfig {
+            guest_path: "/data".to_string(),
+            host_path: PathBuf::from("/home/user/data"),
+            readonly: true,
+        };
+        assert_eq!(mount.guest_path, "/data");
+        assert!(mount.readonly);
     }
 }

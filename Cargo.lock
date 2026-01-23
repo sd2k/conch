@@ -670,10 +670,12 @@ name = "conch-mcp"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "clap",
  "conch",
  "rmcp",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
