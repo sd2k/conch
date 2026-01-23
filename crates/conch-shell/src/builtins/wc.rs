@@ -134,6 +134,9 @@ impl builtins::SimpleCommand for WcCommand {
             writeln!(context.stdout(), "{} total", parts.join(""))?;
         }
 
+        // Ensure output is flushed
+        context.stdout().flush()?;
+
         Ok(ExecutionResult::new(exit_code))
     }
 }

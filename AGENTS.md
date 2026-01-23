@@ -2,86 +2,98 @@
 
 Context for AI agents working on this codebase.
 
-## Important: Read the Notes and Plans
+## Important: Read the Notes
 
-Before making significant changes, check these directories:
+Before making significant changes, check the `notes/` directory:
 
-- **`notes/`** — Current design decisions, architecture notes, and roadmaps
-  - `roadmap-cleanup.md` — The plan for migrating to wasip2 and adding VFS
-  - `vfs-architecture.md` — How VFS works via WASI shadowing (eryx pattern)
-  - `wasip1-vs-wasip2.md` — Why we're switching to wasip2
-  
-- **`plans/`** — Original design documents (gitignored, may be outdated)
-  - Useful for understanding original intent
-  - `notes/` has more current information
+- `vfs-architecture.md` — How hybrid VFS works via WASI shadowing (eryx pattern)
+- `wasip1-vs-wasip2.md` — Why we use wasip2 component model
 
-These documents explain *why* things are the way they are and *where* we're headed. Some notes are transient and may be removed once implemented.
+These documents explain *why* things are the way they are.
 
 ## Important: Use mise for all commands
 
-**Always prefer `mise run <task>` over manual `cargo` commands.** The mise tasks handle proper build ordering, feature flags, and dependencies. Manual cargo commands may miss required build steps or use incorrect flags.
+**Always prefer `mise run <task>` over manual `cargo` commands.** The mise tasks handle proper build ordering, feature flags, and dependencies.
 
 ```bash
-# ✅ Good - use mise tasks
+# Good - use mise tasks
 mise run build
 mise run test
 mise run lint
-mise run check
 
-# ❌ Avoid - manual cargo commands may miss dependencies
+# Avoid - manual cargo commands may miss dependencies
 cargo build
-cargo test
-cargo clippy
 ```
 
-See the "Commands (via mise)" section below for the full list of available tasks.
+See "Commands (via mise)" below for the full list.
 
 ## What This Project Does
 
-Conch is a **sandboxed shell execution engine**. It compiles a bash-compatible shell (brush) to WebAssembly and runs it via wasmtime with strict resource limits. The intended use case is letting AI agents query their execution context using shell commands.
+Conch is a **sandboxed shell execution engine**. It compiles a bash-compatible shell (brush) to WebAssembly and runs it via wasmtime with:
+
+- **Hybrid VFS**: Combine in-memory storage with real filesystem mounts
+- **Strict resource limits**: CPU time, memory, output size
+- **Capability-based security**: Only explicitly mounted paths are accessible
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│  Host (Go/Rust application)                             │
-│                                                         │
-│  ┌───────────────────────────────────────────────────┐  │
-│  │  conch library (Rust)                             │  │
-│  │  - CoreShellExecutor: loads & runs WASM module    │  │
-│  │  - FFI layer: C ABI for Go integration            │  │
-│  │  - VFS: virtual filesystem (planned)              │  │
-│  │  - ResourceLimits: CPU, memory, output caps       │  │
-│  └───────────────────────────────────────────────────┘  │
-│                          │                              │
-│                          ▼                              │
-│  ┌───────────────────────────────────────────────────┐  │
-│  │  wasmtime runtime                                 │  │
-│  │  - WASI Preview 1 (wasip1)                        │  │
-│  │  - Epoch-based CPU interruption                   │  │
-│  │  - Memory limits via ResourceLimiter              │  │
-│  │  - InstancePre for fast per-call instantiation    │  │
-│  └───────────────────────────────────────────────────┘  │
-│                          │                              │
-│                          ▼                              │
-│  ┌───────────────────────────────────────────────────┐  │
-│  │  conch-shell (WASM module)                        │  │
-│  │  - brush-core: full bash interpreter              │  │
-│  │  - brush-builtins: cat, grep, head, tail, etc.    │  │
-│  │  - Custom builtins (planned): ctx-search, jq      │  │
-│  └───────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│  Host Application (Rust/Go)                                 │
+│                                                             │
+│  ┌────────────────────────────────────────────────────────┐ │
+│  │  Shell API (high-level)                                │ │
+│  │  - ShellBuilder: configure VFS paths and real mounts   │ │
+│  │  - Shell::execute(): run commands with hybrid VFS      │ │
+│  │  - VfsStorage: in-memory or custom storage backend     │ │
+│  └────────────────────────────────────────────────────────┘ │
+│                           │                                 │
+│  ┌────────────────────────────────────────────────────────┐ │
+│  │  Conch API (simple)                                    │ │
+│  │  - Conch::execute(): run commands without VFS          │ │
+│  │  - Concurrency limiting via semaphore                  │ │
+│  └────────────────────────────────────────────────────────┘ │
+│                           │                                 │
+│  ┌────────────────────────────────────────────────────────┐ │
+│  │  ComponentShellExecutor (low-level)                    │ │
+│  │  - execute(): basic WASI execution                     │ │
+│  │  - execute_with_hybrid_vfs(): VFS + real mounts        │ │
+│  │  - InstancePre for fast per-call instantiation         │ │
+│  └────────────────────────────────────────────────────────┘ │
+│                           │                                 │
+│  ┌────────────────────────────────────────────────────────┐ │
+│  │  wasmtime runtime                                      │ │
+│  │  - WASI Preview 2 (wasip2) component model             │ │
+│  │  - eryx-vfs: hybrid VFS via WASI shadowing             │ │
+│  │  - Epoch-based CPU interruption                        │ │
+│  │  - Memory limits via ResourceLimiter                   │ │
+│  └────────────────────────────────────────────────────────┘ │
+│                           │                                 │
+│  ┌────────────────────────────────────────────────────────┐ │
+│  │  conch-shell (WASM component)                          │ │
+│  │  - brush-core: full bash interpreter                   │ │
+│  │  - Custom builtins: cat, grep, head, tail, jq, wc      │ │
+│  └────────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 ## Key Design Decisions
 
-1. **brush over custom parser**: The plans mention building a custom tree-sitter parser, but the actual implementation uses [brush](https://github.com/reubeno/brush) — a mature bash-compatible shell. This gives full bash compatibility with less effort.
+1. **Hybrid VFS via eryx-vfs**: The shell sees a unified filesystem that combines:
+   - VFS paths (e.g., `/scratch`) backed by `VfsStorage` trait
+   - Real paths (e.g., `/project`) backed by cap-std `Dir` handles
+   - WASI filesystem interfaces are shadowed to route to the appropriate backend
 
-2. **wasip1 with WASI shadowing**: The shell compiles to `wasm32-wasip1`. For VFS support, the host will shadow WASI filesystem interfaces to route `/ctx/...` paths to a virtual context filesystem (following the eryx pattern).
+2. **wasip2 component model**: We use WASI Preview 2 for better composability and the component model's cleaner interface boundaries.
 
-3. **purego over CGO**: Go bindings use [purego](https://github.com/ebitengine/purego) to call the Rust library without CGO, simplifying cross-compilation.
+3. **Three API levels**:
+   - `Shell`: High-level builder pattern, recommended for most uses
+   - `Conch`: Simple API with concurrency limiting, no VFS
+   - `ComponentShellExecutor`: Low-level control over WASM execution
 
-4. **InstancePre for performance**: The executor pre-links the WASM module once at construction, then creates a fresh Store per execution. This avoids re-linking overhead while ensuring each execution has isolated state.
+4. **purego over CGO**: Go bindings use purego for CGO-free cross-compilation.
+
+5. **InstancePre for performance**: The executor pre-links the WASM component once, then creates a fresh Store per execution.
 
 ## Repository Layout
 
@@ -89,178 +101,149 @@ Conch is a **sandboxed shell execution engine**. It compiles a bash-compatible s
 crates/
 ├── conch/                    # Main host library
 │   ├── src/lib.rs           # Public API exports
-│   ├── src/runtime.rs       # Conch struct, ExecutionContext, ExecutionResult
-│   ├── src/executor/        # Shell executors
+│   ├── src/shell.rs         # Shell and ShellBuilder (high-level API)
+│   ├── src/runtime.rs       # Conch struct, ExecutionResult
+│   ├── src/executor/        # WASM executors
 │   │   ├── mod.rs           # Module exports
-│   │   ├── core.rs          # CoreShellExecutor (wasip1 + brush)
-│   │   └── component.rs     # ComponentShellExecutor (wasip2, placeholder)
-│   ├── src/vfs.rs           # Virtual filesystem traits (ContextFs, ContextProvider)
+│   │   └── component.rs     # ComponentShellExecutor (wasip2)
 │   ├── src/limits.rs        # ResourceLimits struct
-│   ├── src/ffi.rs           # C FFI exports for Go
-│   └── src/tests.rs         # Unit tests
+│   └── src/ffi.rs           # C FFI exports for Go
 │
 ├── conch-mcp/                # MCP server for AI assistant integration
-│   ├── src/lib.rs           # ConchServer implementation with tool router
+│   ├── src/lib.rs           # ConchServer with execute tool
 │   └── src/main.rs          # MCP server binary (stdio transport)
 │
-├── conch-shell/              # WASM shell module
-│   ├── src/lib.rs           # FFI exports: execute(), get_stdout(), etc.
-│   └── src/builtins/        # Custom builtins (placeholder)
+├── conch-shell/              # WASM shell component
+│   ├── src/lib.rs           # WIT component entry point
+│   └── src/builtins/        # Custom builtins (cat, grep, jq, etc.)
 │
 └── conch-cli/                # CLI test tool
     └── src/main.rs          # Simple CLI wrapper
 
+examples/                     # Usage examples
+├── basic.rs                 # Simple Shell API usage
+├── vfs_mounts.rs            # VFS and real filesystem mounts
+├── low_level.rs             # ComponentShellExecutor usage
+└── custom_storage.rs        # Custom VfsStorage implementation
+
 tests/go/
 ├── conch.go                  # Go bindings (purego)
-├── conch_test.go             # Go tests
-└── go.mod                    # Go module
-
-plans/
-├── conch.md                  # Original design doc (VFS, agent context)
-├── conch-implementation.md   # Implementation plan
-├── vfs-integration.md        # VFS via WASI shadowing (eryx pattern)
-└── testing.md                # Test strategy
+└── conch_test.go             # Go tests
 ```
 
 ## Commands (via mise)
 
-**Use mise tasks for builds that involve the WASM module.** For simple Rust-only work, plain cargo commands are fine.
-
 ```bash
-# Basic development (cargo or mise both work)
+# Development
 mise run check           # Check all crates compile
 mise run build           # Build all crates
-mise run test            # Run tests (uses cargo-nextest)
+mise run test            # Run tests (cargo-nextest)
 mise run lint            # Run clippy lints
 mise run fmt             # Format code
 
-# WASM and embedded builds (use mise for correct ordering)
-mise run wasm-build      # Build WASM shell module (wasm32-wasip1)
+# WASM and embedded builds
+mise run wasm-build      # Build WASM component (wasm32-wasip2)
 mise run build-embedded  # Build library with embedded shell
-mise run build-release   # Full release build with embedded shell
+mise run build-release   # Full release build
 
 # MCP server
 mise run build-mcp       # Build the MCP server binary
-mise run run-mcp         # Run the MCP server (stdio transport)
+mise run run-mcp         # Run the MCP server
 
 # Testing
 mise run test-go         # Run Go FFI tests
 mise run test-all        # Rust + Go tests
 
-# CI and validation
+# CI
 mise run ci              # fmt-check, lint, test
-mise run msrv            # Check MSRV (1.85)
 ```
-
-### Why mise for WASM builds?
-
-The mise `depends` ensures correct task ordering — the WASM module must be built before the host library that embeds it. For example, `build-embedded` depends on `wasm-build`.
-
-**Note on caching**: Cargo automatically tracks `include_bytes!()` dependencies, so if the WASM file changes, Cargo will rebuild the host library. No manual cache invalidation needed.
 
 ## Key Files to Understand
 
 | File | Purpose |
 |------|---------|
-| `crates/conch/src/executor/core.rs` | CoreShellExecutor — loads WASM, runs scripts via InstancePre |
-| `crates/conch/src/executor/component.rs` | ComponentShellExecutor — wasip2 executor (placeholder for VFS) |
+| `crates/conch/src/shell.rs` | Shell and ShellBuilder — high-level API |
+| `crates/conch/src/runtime.rs` | Conch struct — simple execution with concurrency |
+| `crates/conch/src/executor/component.rs` | ComponentShellExecutor — low-level WASM control |
 | `crates/conch/src/ffi.rs` | C FFI layer for Go integration |
-| `crates/conch/src/vfs.rs` | ContextFs and ContextProvider for virtual filesystem |
-| `crates/conch-mcp/src/lib.rs` | MCP server with `execute` tool |
-| `crates/conch-shell/src/lib.rs` | WASM module entry point |
-| `tests/go/conch.go` | Go bindings using purego |
+| `crates/conch-shell/src/lib.rs` | WASM component entry point |
+| `crates/conch-shell/src/builtins/*.rs` | Custom shell builtins |
 
 ## Build Artifacts
 
-- `target/wasm32-wasip1/release/conch_shell.wasm` — The shell WASM module
-- `target/release/libconch.so` (Linux) / `libconch.dylib` (macOS) — FFI library
+- `target/wasm32-wasip2/release/conch_shell.wasm` — Shell WASM component
+- `target/release/libconch.so` (Linux) / `.dylib` (macOS) — FFI library
 - `target/release/conch-mcp` — MCP server binary
 
 ## Cargo Features
 
-- `embedded-shell`: Embeds the pre-built WASM module in the library
+- `embedded-shell`: Embeds the pre-built WASM component in the library
 
-## Testing Notes
+## Adding a Builtin
 
-1. **Rust tests**: Standard `cargo test` or `cargo nextest run`
-2. **Go tests**: Require `mise run build-embedded` first to produce libconch.so
-3. **WASM module**: Built separately with `mise run wasm-build`
+1. Create `crates/conch-shell/src/builtins/mybuiltin.rs`
+2. Implement `brush_core::builtins::SimpleCommand`
+3. Register in `builtins::register_builtins()` in `mod.rs`
+4. **Important**: Add `context.stdout().flush()?` before returning
+5. Rebuild WASM: `mise run wasm-build`
 
-## Current State vs Plans
+## VFS Integration
 
-The `plans/` directory describes an ambitious design with:
-- Virtual filesystem exposing agent tool call history (`/ctx/self/tools/...`)
-- Access control between agents
-- Semantic search helpers (`ctx-search`)
-- Custom builtins via tree-sitter parser
+The hybrid VFS uses WASI shadowing via eryx-vfs:
 
-The current implementation:
-- ✅ Working brush-based shell execution
-- ✅ Basic resource limits (CPU epochs, memory, output)
-- ✅ Go FFI bindings via purego
-- ✅ InstancePre for efficient per-call instantiation
-- ✅ Executor module structure (core.rs for wasip1, component.rs placeholder for wasip2)
-- ⏳ VFS integration (ContextFs implemented, not yet wired to WASM execution)
+1. Shell compiles to `wasm32-wasip2` component
+2. Host adds WASI bindings, then shadows with eryx-vfs bindings
+3. `HybridVfsCtx` routes paths to either:
+   - `VfsStorage` (in-memory or custom) for VFS paths
+   - `cap_std::Dir` for real filesystem mounts
+4. Shell uses standard filesystem operations transparently
 
-## VFS Integration (Planned)
-
-The VFS will use WASI filesystem shadowing (like eryx):
-1. Shell compiles to `wasm32-wasip1` and uses standard WASI filesystem calls
-2. Host shadows `wasi:filesystem` interfaces with custom implementation
-3. Paths like `/ctx/self/tools/...` route to `ContextFs`
-4. Real paths (if needed) pass through to actual filesystem
-
-This allows the shell to use familiar filesystem operations while the host controls what's visible.
+```rust
+// Example: Configure hybrid VFS
+let shell = Shell::builder()
+    .vfs_path("/scratch", DirPerms::all(), FilePerms::all())  // VFS
+    .mount("/project", "./code", Mount::readonly())           // Real FS
+    .build()?;
+```
 
 ## Common Tasks
 
-### Adding a builtin
+### Testing changes to builtins
 
-1. Add to `crates/conch-shell/src/builtins/`
-2. Register in `builtins::register_builtins()` 
-3. Rebuild WASM: `mise run wasm-build`
+```bash
+mise run wasm-build      # Rebuild WASM component
+mise run test            # Run tests
+```
 
 ### Testing Go integration
 
 ```bash
-mise run build-embedded  # Must build library first
-mise run test-go
+mise run build-embedded  # Build library with embedded WASM
+mise run test-go         # Run Go tests
 ```
 
-### Debugging WASM execution
+### Debugging execution
 
-The CLI tool is useful for testing (after building with mise):
 ```bash
 mise run build-embedded
 ./target/release/conch-cli -c "echo hello | cat"
 ```
 
-### Running the MCP server
+### Running MCP server
 
-Build and run the MCP server for AI assistant integration:
 ```bash
-mise run build-embedded  # Build with embedded WASM module
-cargo run -p conch-mcp   # Run MCP server over stdio
-```
-
-Configure in Claude Desktop (`~/Library/Application Support/Claude/claude_desktop_config.json`):
-```json
-{
-  "mcpServers": {
-    "conch": {
-      "command": "/path/to/target/release/conch-mcp"
-    }
-  }
-}
+mise run build-mcp
+./target/release/conch-mcp
 ```
 
 ## Dependencies
 
 Key crates:
-- `wasmtime` (v41): WASM runtime with InstancePre support
-- `wasmtime-wasi`: WASI Preview 1 support
+- `wasmtime` (v41): WASM runtime with component model support
+- `wasmtime-wasi`: WASI Preview 2 support
+- `eryx-vfs`: Hybrid VFS via WASI shadowing
 - `brush-core`, `brush-builtins`: Bash shell implementation
-- `tokio`: Async runtime (single-threaded in WASM)
+- `tokio`: Async runtime
 
 Go:
 - `github.com/ebitengine/purego`: FFI without CGO

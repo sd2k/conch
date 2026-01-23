@@ -108,11 +108,11 @@ impl builtins::SimpleCommand for CatCommand {
 
                     context.stdout().write_all(b"\n")?;
                 }
-
-                // Remove the extra newline we added at the end
-                // This is tricky with the streaming approach, so we skip this optimization
             }
         }
+
+        // Ensure output is flushed - required for hybrid VFS mode
+        context.stdout().flush()?;
 
         Ok(ExecutionResult::new(exit_code))
     }

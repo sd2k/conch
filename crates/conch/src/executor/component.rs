@@ -6,26 +6,24 @@
 //!
 //! ## VFS Integration
 //!
-//! When executing with a context provider, the executor exposes agent context via WASI
-//! filesystem shadowing:
+//! The executor supports two modes:
 //!
-//! - `/ctx/self/tools/<id>/` - Tool call history
-//! - `/ctx/self/messages/` - Conversation history
-//! - `/ctx/self/scratch/` - Read-write workspace
-//! - `/tmp/` - Temporary scratch space (ephemeral)
+//! - **Basic mode**: Standard WASI filesystem (no VFS)
+//! - **Hybrid VFS mode**: Combines virtual storage with real filesystem mounts
 
 use std::path::Path;
 use std::sync::Arc;
 
-use eryx_vfs::{VfsCtx, VfsState, VfsView, add_vfs_to_linker};
+use eryx_vfs::{HybridVfsCtx, VfsStorage};
+#[cfg(feature = "embedded-shell")]
+use eryx_vfs::{HybridVfsState, HybridVfsView, add_hybrid_vfs_to_linker};
 use wasmtime::component::{Component, Linker, ResourceTable};
 use wasmtime::{Config, Engine, Store};
 use wasmtime_wasi::p2::pipe::MemoryOutputPipe;
-use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
+use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use crate::limits::ResourceLimits;
 use crate::runtime::{ExecutionResult, RuntimeError};
-use crate::vfs::{AccessPolicy, ContextProvider, ContextStorage};
 
 // Generate host bindings for the shell component.
 // This creates the `Shell` struct for calling into the component.
@@ -48,8 +46,6 @@ pub struct ComponentState {
     stdout_pipe: MemoryOutputPipe,
     stderr_pipe: MemoryOutputPipe,
     limiter: StoreLimiter,
-    /// Optional VFS context for exposing agent context as filesystem.
-    vfs_ctx: Option<VfsCtx<ContextStorage>>,
 }
 
 impl ComponentState {
@@ -69,39 +65,6 @@ impl ComponentState {
             stdout_pipe,
             stderr_pipe,
             limiter: StoreLimiter::new(max_memory_bytes),
-            vfs_ctx: None,
-        }
-    }
-
-    /// Create a new component state with VFS context for agent context access.
-    fn with_vfs(
-        output_capacity: usize,
-        max_memory_bytes: u64,
-        provider: Arc<dyn ContextProvider>,
-        policy: AccessPolicy,
-    ) -> Self {
-        let stdout_pipe = MemoryOutputPipe::new(output_capacity);
-        let stderr_pipe = MemoryOutputPipe::new(output_capacity);
-
-        let wasi = WasiCtxBuilder::new()
-            .stdout(stdout_pipe.clone())
-            .stderr(stderr_pipe.clone())
-            .build();
-
-        // Create VFS context with preopened directories
-        let storage = Arc::new(ContextStorage::new(provider, policy));
-        let mut vfs_ctx = VfsCtx::new_empty(storage);
-        // Preopen root "/" so all absolute paths work through VFS
-        // The ContextStorage routes /ctx/* to context and /tmp/* to scratch
-        vfs_ctx.preopen("/", DirPerms::READ, FilePerms::READ);
-
-        Self {
-            wasi,
-            table: ResourceTable::new(),
-            stdout_pipe,
-            stderr_pipe,
-            limiter: StoreLimiter::new(max_memory_bytes),
-            vfs_ctx: Some(vfs_ctx),
         }
     }
 
@@ -125,21 +88,76 @@ impl WasiView for ComponentState {
     }
 }
 
-impl VfsView for ComponentState {
-    type Storage = ContextStorage;
+/// State held by the WASM store during hybrid VFS execution.
+///
+/// This state supports the Shell API with hybrid VFS that combines
+/// virtual storage with real filesystem mounts.
+#[cfg(feature = "embedded-shell")]
+pub struct HybridComponentState<S: VfsStorage + 'static> {
+    wasi: WasiCtx,
+    table: ResourceTable,
+    stdout_pipe: MemoryOutputPipe,
+    stderr_pipe: MemoryOutputPipe,
+    limiter: StoreLimiter,
+    hybrid_vfs_ctx: HybridVfsCtx<S>,
+}
 
-    fn vfs(&mut self) -> VfsState<'_, Self::Storage> {
-        VfsState {
-            ctx: self.vfs_ctx.as_mut().expect("VFS context not initialized"),
+#[cfg(feature = "embedded-shell")]
+impl<S: VfsStorage + 'static> HybridComponentState<S> {
+    /// Create a new hybrid component state.
+    fn new(output_capacity: usize, max_memory_bytes: u64, hybrid_vfs_ctx: HybridVfsCtx<S>) -> Self {
+        let stdout_pipe = MemoryOutputPipe::new(output_capacity);
+        let stderr_pipe = MemoryOutputPipe::new(output_capacity);
+
+        let wasi = WasiCtxBuilder::new()
+            .stdout(stdout_pipe.clone())
+            .stderr(stderr_pipe.clone())
+            .build();
+
+        Self {
+            wasi,
+            table: ResourceTable::new(),
+            stdout_pipe,
+            stderr_pipe,
+            limiter: StoreLimiter::new(max_memory_bytes),
+            hybrid_vfs_ctx,
+        }
+    }
+
+    /// Get the captured stdout contents.
+    fn stdout(&self) -> Vec<u8> {
+        self.stdout_pipe.contents().to_vec()
+    }
+
+    /// Get the captured stderr contents.
+    fn stderr(&self) -> Vec<u8> {
+        self.stderr_pipe.contents().to_vec()
+    }
+}
+
+#[cfg(feature = "embedded-shell")]
+impl<S: VfsStorage + 'static> WasiView for HybridComponentState<S> {
+    fn ctx(&mut self) -> WasiCtxView<'_> {
+        WasiCtxView {
+            ctx: &mut self.wasi,
             table: &mut self.table,
         }
+    }
+}
+
+#[cfg(feature = "embedded-shell")]
+impl<S: VfsStorage + 'static> HybridVfsView for HybridComponentState<S> {
+    type Storage = S;
+
+    fn hybrid_vfs(&mut self) -> HybridVfsState<'_, Self::Storage> {
+        HybridVfsState::new(&mut self.hybrid_vfs_ctx, &mut self.table)
     }
 }
 
 /// Executor for running shell scripts in WASM using the component model.
 ///
 /// This pre-links the WASI component once at construction time, then efficiently
-/// instantiate per execution call. The `Engine` and `InstancePre` are shared
+/// instantiates per execution call. The `Engine` and `InstancePre` are shared
 /// across all executions, while each execution gets its own `Store` with fresh
 /// WASI context and output pipes.
 ///
@@ -147,16 +165,15 @@ impl VfsView for ComponentState {
 ///
 /// The executor supports two modes:
 /// - **Basic mode**: Uses standard WASI filesystem (default)
-/// - **VFS mode**: Exposes agent context via WASI filesystem shadowing
+/// - **Hybrid VFS mode**: Combines virtual storage with real filesystem mounts
 ///
-/// Use `execute_with_context()` to run scripts with VFS access to agent context.
+/// For hybrid VFS, use the [`Shell`](crate::Shell) API which provides a higher-level
+/// interface with builder pattern for configuring mounts.
 #[derive(Clone)]
 pub struct ComponentShellExecutor {
     engine: Arc<Engine>,
     /// Pre-instantiated component for basic execution (WASI only).
     instance_pre: Arc<wasmtime::component::InstancePre<ComponentState>>,
-    /// Pre-instantiated component for VFS execution (WASI + VFS shadowing).
-    instance_pre_vfs: Arc<wasmtime::component::InstancePre<ComponentState>>,
 }
 
 impl std::fmt::Debug for ComponentShellExecutor {
@@ -217,25 +234,9 @@ impl ComponentShellExecutor {
             .instantiate_pre(&component)
             .map_err(|e| RuntimeError::Wasm(e.to_string()))?;
 
-        // Create VFS linker: WASI first, then VFS to shadow filesystem
-        let mut linker_vfs = Linker::new(&engine);
-        wasmtime_wasi::p2::add_to_linker_async(&mut linker_vfs)
-            .map_err(|e| RuntimeError::Wasm(e.to_string()))?;
-        // Enable shadowing to allow VFS to override WASI filesystem bindings
-        linker_vfs.allow_shadowing(true);
-        add_vfs_to_linker(&mut linker_vfs)
-            .map_err(|e| RuntimeError::Wasm(format!("failed to add VFS to linker: {}", e)))?;
-        linker_vfs.allow_shadowing(false);
-
-        // Pre-instantiate for VFS execution
-        let instance_pre_vfs = linker_vfs
-            .instantiate_pre(&component)
-            .map_err(|e| RuntimeError::Wasm(e.to_string()))?;
-
         Ok(Self {
             engine: Arc::new(engine),
             instance_pre: Arc::new(instance_pre),
-            instance_pre_vfs: Arc::new(instance_pre_vfs),
         })
     }
 
@@ -325,38 +326,41 @@ impl ComponentShellExecutor {
         })
     }
 
-    /// Execute a shell script with VFS access to agent context.
+    /// Execute a shell script with hybrid VFS (virtual storage + real filesystem).
     ///
-    /// This method exposes agent context as a virtual filesystem:
-    /// - `/ctx/self/tools/<id>/` - Tool call history
-    /// - `/ctx/self/messages/` - Conversation history
-    /// - `/ctx/self/scratch/` - Read-write workspace
-    /// - `/tmp/` - Temporary scratch space
+    /// This method supports the Shell API that combines:
+    /// - VFS storage paths (backed by `VfsStorage` trait)
+    /// - Real filesystem mounts (backed by cap-std)
+    ///
+    /// The `HybridVfsCtx` should be pre-configured with preopened directories
+    /// via `add_vfs_preopen()` and `add_real_preopen()`.
     ///
     /// # Example
     ///
     /// ```ignore
-    /// let provider = Arc::new(MyContextProvider::new());
-    /// let result = executor.execute_with_context(
-    ///     "cat /ctx/self/tools/latest/output.txt",
+    /// let storage = Arc::new(InMemoryStorage::new());
+    /// let mut hybrid_ctx = HybridVfsCtx::new(storage);
+    /// hybrid_ctx.add_vfs_preopen("/scratch", DirPerms::all(), FilePerms::all());
+    /// hybrid_ctx.add_real_preopen_path("/project", "./code", DirPerms::READ, FilePerms::READ)?;
+    ///
+    /// let result = executor.execute_with_hybrid_vfs(
+    ///     "cat /project/README.md",
     ///     &limits,
-    ///     provider,
-    ///     AccessPolicy::default(),
+    ///     hybrid_ctx,
     /// ).await?;
     /// ```
-    pub async fn execute_with_context(
+    #[cfg(feature = "embedded-shell")]
+    pub async fn execute_with_hybrid_vfs<S: VfsStorage + 'static>(
         &self,
         script: &str,
         limits: &ResourceLimits,
-        provider: Arc<dyn ContextProvider>,
-        policy: AccessPolicy,
+        hybrid_ctx: HybridVfsCtx<S>,
     ) -> Result<ExecutionResult, RuntimeError> {
-        // Create state with VFS context
-        let state = ComponentState::with_vfs(
+        // Create state with hybrid VFS context
+        let state = HybridComponentState::new(
             limits.max_output_bytes as usize,
             limits.max_memory_bytes,
-            provider,
-            policy,
+            hybrid_ctx,
         );
 
         let mut store = Store::new(&self.engine, state);
@@ -375,10 +379,26 @@ impl ComponentShellExecutor {
             engine.increment_epoch();
         });
 
-        // Instantiate using VFS-enabled pre-instance
-        let instance = self
-            .instance_pre_vfs
-            .instantiate_async(&mut store)
+        // We need a linker for hybrid VFS - create it on demand
+        // Note: This is less efficient than pre-instantiation, but hybrid VFS
+        // requires the storage type at link time. A future optimization could
+        // cache linkers per storage type.
+        let mut linker = Linker::<HybridComponentState<S>>::new(&self.engine);
+        wasmtime_wasi::p2::add_to_linker_async(&mut linker)
+            .map_err(|e| RuntimeError::Wasm(e.to_string()))?;
+        linker.allow_shadowing(true);
+        add_hybrid_vfs_to_linker(&mut linker).map_err(|e| {
+            RuntimeError::Wasm(format!("failed to add hybrid VFS to linker: {}", e))
+        })?;
+        linker.allow_shadowing(false);
+
+        // Load the component
+        let component = Component::new(&self.engine, EMBEDDED_COMPONENT)
+            .map_err(|e| RuntimeError::Wasm(e.to_string()))?;
+
+        // Instantiate the component
+        let instance = linker
+            .instantiate_async(&mut store, &component)
             .await
             .map_err(|e| RuntimeError::Wasm(format!("instantiation failed: {}", e)))?;
 
@@ -423,6 +443,19 @@ impl ComponentShellExecutor {
             truncated: false,
             stats: crate::runtime::ExecutionStats::default(),
         })
+    }
+
+    /// Execute a shell script with hybrid VFS (stub for when embedded-shell is disabled).
+    #[cfg(not(feature = "embedded-shell"))]
+    pub async fn execute_with_hybrid_vfs<S: VfsStorage + 'static>(
+        &self,
+        _script: &str,
+        _limits: &ResourceLimits,
+        _hybrid_ctx: HybridVfsCtx<S>,
+    ) -> Result<ExecutionResult, RuntimeError> {
+        Err(RuntimeError::Wasm(
+            "execute_with_hybrid_vfs requires embedded-shell feature".to_string(),
+        ))
     }
 }
 
@@ -547,83 +580,5 @@ mod tests {
 
         assert_eq!(result1.exit_code, 0);
         assert_eq!(result2.exit_code, 0);
-    }
-
-    #[tokio::test]
-    async fn test_execute_with_context_basic() {
-        use crate::vfs::MockContextProvider;
-
-        let executor = ComponentShellExecutor::embedded().expect("Failed to create executor");
-        let limits = ResourceLimits::default();
-        let provider = Arc::new(MockContextProvider::new());
-        let policy = AccessPolicy::default();
-
-        // Simple echo test to verify VFS executor works
-        let result = executor
-            .execute_with_context("echo 'vfs test'", &limits, provider, policy)
-            .await
-            .expect("execute failed");
-
-        let stdout = String::from_utf8_lossy(&result.stdout);
-        let stderr = String::from_utf8_lossy(&result.stderr);
-        assert_eq!(
-            result.exit_code, 0,
-            "expected exit 0, got {}. stdout: {}, stderr: {}",
-            result.exit_code, stdout, stderr
-        );
-        assert!(
-            stdout.contains("vfs test"),
-            "stdout should contain output: {}",
-            stdout
-        );
-    }
-
-    #[tokio::test]
-    async fn test_execute_with_context_cat_file() {
-        use crate::vfs::{MockContextProvider, ToolCall};
-
-        let executor = ComponentShellExecutor::embedded().expect("Failed to create executor");
-        let limits = ResourceLimits::default();
-
-        // Create a mock provider with a test tool call
-        let tool_call = ToolCall {
-            id: "tool-0".to_string(),
-            tool: "test_tool".to_string(),
-            params: serde_json::json!({"arg": "value"}),
-            result: serde_json::json!({"output": "test result"}),
-            started_at: "2025-01-01T00:00:00Z".to_string(),
-            completed_at: "2025-01-01T00:00:01Z".to_string(),
-            duration_ms: 1000,
-            success: true,
-            error: None,
-        };
-        let provider =
-            Arc::new(MockContextProvider::new().with_tool_calls("self", vec![tool_call]));
-        let policy = AccessPolicy::default();
-
-        // Try to cat the tool call request file from the VFS
-        let result = executor
-            .execute_with_context(
-                "cat /ctx/self/tools/tool-0/request.json",
-                &limits,
-                provider,
-                policy,
-            )
-            .await
-            .expect("execute failed");
-
-        let stdout = String::from_utf8_lossy(&result.stdout);
-        let stderr = String::from_utf8_lossy(&result.stderr);
-
-        assert_eq!(
-            result.exit_code, 0,
-            "cat should succeed. stdout: {}, stderr: {}",
-            stdout, stderr
-        );
-        assert!(
-            stdout.contains("arg"),
-            "stdout should contain request JSON: {}",
-            stdout
-        );
     }
 }

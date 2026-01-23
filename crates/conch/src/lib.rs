@@ -1,22 +1,55 @@
 //! Conch: Virtual Filesystem Shell Sandbox
 //!
-//! Conch exposes multi-agent tool call history as a POSIX-like virtual filesystem,
-//! allowing agents to query and analyze their own and related agents' execution
-//! context using familiar shell commands within a secure WASM sandbox.
+//! Conch provides a sandboxed shell environment for executing commands with a
+//! hybrid virtual filesystem that combines:
+//!
+//! - **VFS storage**: In-memory or custom storage for orchestrator-controlled paths
+//! - **Real filesystem**: cap-std secured mounts for host directory access
+//!
+//! # Example
+//!
+//! ```rust,ignore
+//! use conch::{Shell, Mount, ResourceLimits};
+//!
+//! // Create a shell with a real filesystem mount
+//! let shell = Shell::builder()
+//!     .mount("/project", "/home/user/code", Mount::readonly())
+//!     .build()?;
+//!
+//! // Write data to VFS scratch area
+//! shell.vfs().write("/scratch/input.txt", b"hello").await?;
+//!
+//! // Execute commands
+//! let result = shell.execute(
+//!     "cat /scratch/input.txt && ls /project/src",
+//!     &ResourceLimits::default(),
+//! ).await?;
+//! ```
 
 mod executor;
 mod limits;
 mod runtime;
-mod vfs;
+mod shell;
 
 #[cfg(test)]
 mod tests;
 
 pub mod ffi;
 
+// Core Shell API
+pub use shell::{Mount, Shell, ShellBuilder};
+
+/// Type alias for a shell with the default in-memory storage.
+pub type DefaultShell = Shell<InMemoryStorage>;
+
+// Executor (for advanced usage)
 pub use executor::ComponentShellExecutor;
+
+// Resource limits
 pub use limits::ResourceLimits;
-pub use runtime::{Conch, ExecutionContext, ExecutionResult, ExecutionStats, RuntimeError};
-pub use vfs::{
-    AccessPolicy, ContextFs, ContextProvider, ContextStorage, DirEntry, FsError, Metadata,
-};
+
+// Runtime types
+pub use runtime::{Conch, ExecutionResult, ExecutionStats, RuntimeError};
+
+// Re-export eryx-vfs types for VFS storage
+pub use eryx_vfs::{DirPerms, FilePerms, InMemoryStorage, VfsStorage};

@@ -70,7 +70,7 @@ impl ConchServer {
 
         let result = self
             .conch
-            .execute_simple(&params.command, limits)
+            .execute(&params.command, limits)
             .await
             .map_err(|e| McpError::internal_error(format!("Execution error: {}", e), None))?;
 
