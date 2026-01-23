@@ -73,14 +73,44 @@ export!(ShellComponent);
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use brush_core::{ExecutionParameters, Shell, SourceInfo, openfiles};
+    use std::collections::HashMap;
+
+    /// Execute a script with stdout/stderr redirected to /dev/null.
+    /// This prevents test output from being noisy.
+    pub(crate) async fn execute_quiet(script: &str) -> Result<i32, String> {
+        let mut shell_builtins =
+            brush_builtins::default_builtins(brush_builtins::BuiltinSet::BashMode);
+        crate::builtins::register_builtins(&mut shell_builtins);
+
+        // Redirect stdout (fd 1) and stderr (fd 2) to /dev/null
+        let null_out = openfiles::null().map_err(|e| e.to_string())?;
+        let null_err = openfiles::null().map_err(|e| e.to_string())?;
+
+        let mut shell = Shell::builder()
+            .builtins(shell_builtins)
+            .fds(HashMap::from([(1.into(), null_out), (2.into(), null_err)]))
+            .build()
+            .await
+            .map_err(|e| format!("failed to create shell: {}", e))?;
+
+        let source_info = SourceInfo::default();
+        let exec_params = ExecutionParameters::default();
+
+        let result = shell
+            .run_string(script, &source_info, &exec_params)
+            .await
+            .map_err(|e| format!("execution error: {}", e))?;
+
+        Ok(i32::from(u8::from(result.exit_code)))
+    }
 
     fn execute_test(script: &str) -> Result<i32, String> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("failed to create runtime");
-        rt.block_on(execute_script_async(script))
+        rt.block_on(execute_quiet(script))
     }
 
     #[test]
@@ -128,14 +158,14 @@ mod tests {
 
 #[cfg(test)]
 mod pipe_tests {
-    use super::*;
+    use super::tests::execute_quiet;
 
     fn execute_test(script: &str) -> Result<i32, String> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("failed to create runtime");
-        rt.block_on(execute_script_async(script))
+        rt.block_on(execute_quiet(script))
     }
 
     #[test]

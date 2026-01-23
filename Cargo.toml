@@ -12,6 +12,10 @@ rust-version = "1.85"
 # Host runtime (wasmtime 41+ for component model)
 wasmtime = { version = "41", features = ["component-model", "async"] }
 wasmtime-wasi = "41"
+wasmtime-wasi-io = "41"
+
+# VFS for WASI filesystem shadowing (from eryx project, local path for wasmtime 41 compat)
+eryx-vfs = { path = "../eryx/crates/eryx-vfs" }
 
 # Async
 tokio = { version = "1" }
