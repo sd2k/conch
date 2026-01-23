@@ -1,8 +1,8 @@
 package conch
 
 import (
-	"testing"
 	"strings"
+	"testing"
 )
 
 func TestSimplePipe(t *testing.T) {
@@ -13,9 +13,9 @@ func TestSimplePipe(t *testing.T) {
 		t.Skip("Skipping: library not built with embedded-shell feature")
 	}
 
-	exec, err := NewCoreExecutorEmbedded()
+	exec, err := NewExecutorEmbedded()
 	if err != nil {
-		t.Fatalf("NewCoreExecutorEmbedded() error = %v", err)
+		t.Fatalf("NewExecutorEmbedded() error = %v", err)
 	}
 	defer exec.Close()
 
