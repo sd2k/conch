@@ -7,9 +7,11 @@ rust-version.workspace = true
 description = "Brush-based shell WASM component for Conch"
 
 [lib]
-crate-type = ["cdylib", "rlib"]
+crate-type = ["cdylib"]
 
 [dependencies]
+# WIT bindings for component model exports
+wit-bindgen = { workspace = true }
 # Brush shell (using local patched version until wasm-js PR is merged)
 brush-core = { workspace = true }
 brush-builtins = { workspace = true, features = [

@@ -20,7 +20,7 @@ use std::cell::RefCell;
 use std::ffi::{CStr, CString, c_char};
 use std::ptr;
 
-use crate::executor::CoreShellExecutor;
+use crate::executor::ComponentShellExecutor;
 use crate::limits::ResourceLimits;
 
 thread_local! {
@@ -54,7 +54,7 @@ pub struct ConchResult {
 /// Opaque handle to a shell executor.
 #[derive(Debug)]
 pub struct ConchExecutor {
-    executor: CoreShellExecutor,
+    executor: ComponentShellExecutor,
 }
 
 // ============================================================================
@@ -90,7 +90,7 @@ pub extern "C" fn conch_last_error() -> *const c_char {
 #[cfg(feature = "embedded-shell")]
 #[unsafe(no_mangle)]
 pub extern "C" fn conch_executor_new_embedded() -> *mut ConchExecutor {
-    match CoreShellExecutor::embedded() {
+    match ComponentShellExecutor::embedded() {
         Ok(executor) => Box::into_raw(Box::new(ConchExecutor { executor })),
         Err(e) => {
             set_last_error(&format!("failed to create executor: {}", e));
@@ -137,7 +137,7 @@ pub unsafe extern "C" fn conch_executor_new(module_path: *const c_char) -> *mut 
         }
     };
 
-    match CoreShellExecutor::from_file(path) {
+    match ComponentShellExecutor::from_file(path) {
         Ok(executor) => Box::into_raw(Box::new(ConchExecutor { executor })),
         Err(e) => {
             set_last_error(&format!("failed to create executor: {}", e));
@@ -166,7 +166,7 @@ pub unsafe extern "C" fn conch_executor_new_from_bytes(
 
     let bytes = unsafe { std::slice::from_raw_parts(module_data, module_len) };
 
-    match CoreShellExecutor::from_bytes(bytes) {
+    match ComponentShellExecutor::from_bytes(bytes) {
         Ok(executor) => Box::into_raw(Box::new(ConchExecutor { executor })),
         Err(e) => {
             set_last_error(&format!("failed to create executor: {}", e));

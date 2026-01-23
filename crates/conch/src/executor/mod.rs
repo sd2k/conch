@@ -1,15 +1,11 @@
-//! WASM executors for running shell scripts.
+//! WASM executor for running shell scripts.
 //!
-//! This module provides two executor implementations:
+//! This module provides the [`ComponentShellExecutor`] which uses the
+//! wasip2 component model to run shell scripts in a WASM sandbox.
 //!
-//! - [`CoreShellExecutor`]: Uses wasip1 core modules (legacy, for compatibility)
-//! - [`ComponentShellExecutor`]: Uses wasip2 component model (preferred)
-//!
-//! Both executors use the `InstancePre` pattern to pre-link modules once,
+//! The executor uses the `InstancePre` pattern to pre-link the component once,
 //! then efficiently instantiate per execution call.
 
 mod component;
-mod core;
 
 pub use component::ComponentShellExecutor;
-pub use core::CoreShellExecutor;

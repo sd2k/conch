@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::Semaphore;
 
-use crate::executor::CoreShellExecutor;
+use crate::executor::ComponentShellExecutor;
 use crate::limits::ResourceLimits;
 use crate::vfs::{AccessPolicy, ContextFs, ContextProvider};
 
@@ -134,12 +134,12 @@ pub struct ExecutionResult {
 
 /// Shell execution engine
 ///
-/// Wraps the CoreShellExecutor to run shell scripts in a WASM sandbox.
+/// Wraps the ComponentShellExecutor to run shell scripts in a WASM sandbox.
 /// Provides concurrency limiting and execution context management.
 pub struct Conch {
     max_concurrent: usize,
     semaphore: Arc<Semaphore>,
-    executor: CoreShellExecutor,
+    executor: ComponentShellExecutor,
 }
 
 impl fmt::Debug for Conch {
@@ -151,12 +151,12 @@ impl fmt::Debug for Conch {
 }
 
 impl Conch {
-    /// Create a new shell execution engine from a WASM module file.
+    /// Create a new shell execution engine from a WASM component file.
     pub fn from_file(
         path: impl AsRef<std::path::Path>,
         max_concurrent: usize,
     ) -> Result<Self, RuntimeError> {
-        let executor = CoreShellExecutor::from_file(path)?;
+        let executor = ComponentShellExecutor::from_file(path)?;
         Ok(Self {
             max_concurrent,
             semaphore: Arc::new(Semaphore::new(max_concurrent)),
@@ -164,9 +164,9 @@ impl Conch {
         })
     }
 
-    /// Create a new shell execution engine from WASM module bytes.
+    /// Create a new shell execution engine from WASM component bytes.
     pub fn from_bytes(bytes: &[u8], max_concurrent: usize) -> Result<Self, RuntimeError> {
-        let executor = CoreShellExecutor::from_bytes(bytes)?;
+        let executor = ComponentShellExecutor::from_bytes(bytes)?;
         Ok(Self {
             max_concurrent,
             semaphore: Arc::new(Semaphore::new(max_concurrent)),
@@ -174,12 +174,12 @@ impl Conch {
         })
     }
 
-    /// Create a new shell execution engine using the embedded WASM module.
+    /// Create a new shell execution engine using the embedded WASM component.
     ///
     /// This is only available when built with the `embedded-shell` feature.
     #[cfg(feature = "embedded-shell")]
     pub fn embedded(max_concurrent: usize) -> Result<Self, RuntimeError> {
-        let executor = CoreShellExecutor::embedded()?;
+        let executor = ComponentShellExecutor::embedded()?;
         Ok(Self {
             max_concurrent,
             semaphore: Arc::new(Semaphore::new(max_concurrent)),
@@ -262,12 +262,12 @@ mod tests {
                 })
                 .unwrap_or_else(|_| std::path::PathBuf::from("."));
 
-            let module_path = workspace_root.join("target/wasm32-wasip1/release/conch_shell.wasm");
+            let module_path = workspace_root.join("target/wasm32-wasip2/release/conch_shell.wasm");
 
             if module_path.exists() {
                 Conch::from_file(&module_path, 1).ok()
             } else {
-                eprintln!("Module not found at {:?}", module_path);
+                eprintln!("Component not found at {:?}", module_path);
                 None
             }
         }

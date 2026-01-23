@@ -49,22 +49,12 @@ run = "cargo clean"
 # =============================================================================
 
 [tasks.wasm-target]
-description = "Install wasm32-wasip1 target"
-run = "rustup target add wasm32-wasip1"
-
-[tasks.wasm-build]
-description = "Build WASM shell module (wasip1)"
-depends = ["wasm-target"]
-run = "cargo build -p conch-shell --target wasm32-wasip1 --release"
-
-# Future: wasip2 component build (for VFS integration)
-[tasks.wasm-target-p2]
 description = "Install wasm32-wasip2 target"
 run = "rustup target add wasm32-wasip2"
 
-[tasks.wasm-build-p2]
+[tasks.wasm-build]
 description = "Build WASM shell component (wasip2)"
-depends = ["wasm-target-p2"]
+depends = ["wasm-target"]
 run = "cargo build -p conch-shell --target wasm32-wasip2 --release"
 
 [tasks.build-embedded]

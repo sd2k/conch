@@ -14,7 +14,7 @@ mod tests;
 
 pub mod ffi;
 
-pub use executor::{ComponentShellExecutor, CoreShellExecutor};
+pub use executor::ComponentShellExecutor;
 pub use limits::ResourceLimits;
 pub use runtime::{Conch, ExecutionContext, ExecutionResult, ExecutionStats, RuntimeError};
 pub use vfs::{AccessPolicy, ContextFs, ContextProvider, DirEntry, FsError, Metadata};

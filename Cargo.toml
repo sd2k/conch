@@ -47,6 +47,7 @@ conch = { path = "crates/conch" }
 jaq-core = "3.0.0-beta"
 jaq-json = "2.0.0-beta"
 jaq-std = "3.0.0-beta"
+wit-bindgen = "0.41"
 rmcp = "0.13"
 tracing-subscriber = "0.3"
 

@@ -7,7 +7,7 @@
 
 use std::io::{self, Read, Write};
 
-use conch::{CoreShellExecutor, ResourceLimits};
+use conch::{ComponentShellExecutor, ResourceLimits};
 
 #[tokio::main]
 async fn main() {
@@ -36,7 +36,7 @@ async fn main() {
     };
 
     // Create the shell executor
-    let executor = match CoreShellExecutor::embedded() {
+    let executor = match ComponentShellExecutor::embedded() {
         Ok(e) => e,
         Err(e) => {
             eprintln!("conch: failed to initialize shell: {}", e);

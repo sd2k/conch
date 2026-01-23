@@ -1,0 +1,26 @@
+package conch:shell@0.1.0;
+
+/// The conch shell sandbox world.
+///
+/// This defines the interface between the host (Rust) and the guest (shell WASM).
+/// The guest exports an execute function that runs shell scripts.
+/// Standard WASI interfaces are used for filesystem, stdio, and clocks.
+world shell {
+    /// Output from executing a shell script.
+    record execute-result {
+        /// Exit code from the shell (0 = success).
+        exit-code: s32,
+        /// Captured stdout from the execution.
+        stdout: list<u8>,
+        /// Captured stderr from the execution.
+        stderr: list<u8>,
+    }
+
+    /// Execute a shell script in the sandbox.
+    ///
+    /// The script is interpreted as bash-compatible shell code.
+    /// Standard builtins like echo, cat, grep, jq, head, tail are available.
+    ///
+    /// Returns the exit code and captured stdout/stderr.
+    export execute: func(script: string) -> execute-result;
+}
