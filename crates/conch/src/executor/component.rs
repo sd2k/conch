@@ -211,24 +211,12 @@ impl ComponentShellExecutor {
         // Cancel the timeout task
         epoch_handle.abort();
 
-        // Get captured output from the store
+        // Get captured output from the WASI pipes.
+        // The shell writes to WASI stdout/stderr which we intercept via MemoryOutputPipe.
+        // The WIT result's stdout/stderr fields are unused (always empty).
         let state = store.data();
-        let captured_stdout = state.stdout();
-        let captured_stderr = state.stderr();
-
-        // Combine captured output with result output
-        // The WIT interface returns stdout/stderr from the shell,
-        // but WASI stdout/stderr are captured separately
-        let mut stdout = result.stdout;
-        let mut stderr = result.stderr;
-
-        // If the WIT result is empty but WASI captured output, use that
-        if stdout.is_empty() && !captured_stdout.is_empty() {
-            stdout = captured_stdout;
-        }
-        if stderr.is_empty() && !captured_stderr.is_empty() {
-            stderr = captured_stderr;
-        }
+        let stdout = state.stdout();
+        let stderr = state.stderr();
 
         Ok(ExecutionResult {
             exit_code: result.exit_code,

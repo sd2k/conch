@@ -69,10 +69,13 @@ async fn execute_script_async(script: &str) -> ExecuteResult {
     match shell.run_string(script, &source_info, &exec_params).await {
         Ok(result) => {
             let exit_code = i32::from(u8::from(result.exit_code));
+            // Note: stdout/stderr are captured by the host via WASI pipes,
+            // not returned in this result. The shell writes directly to
+            // WASI stdout/stderr which the host intercepts.
             ExecuteResult {
                 exit_code,
-                stdout: Vec::new(), // TODO: capture stdout via WASI
-                stderr: Vec::new(), // TODO: capture stderr via WASI
+                stdout: Vec::new(),
+                stderr: Vec::new(),
             }
         }
         Err(e) => ExecuteResult {
