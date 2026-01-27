@@ -429,8 +429,15 @@ impl AgentSandbox {
     ///
     /// The script has access to:
     /// - `/agent/` - Agent metadata and scratch space
-    /// - `/tools/` - Tool definitions (read-only)
+    /// - `/tools/` - Tool definitions
+    /// - `/history/` - Conversation history (if configured)
     /// - Workspace mounts configured via `mount()`
+    ///
+    /// If a policy was configured via [`AgentSandboxBuilder::policy`], it enforces
+    /// access control on all filesystem operations. The default `agent_sandbox_policy()`
+    /// allows reads to `/agent/**`, `/tools/**`, `/history/**` and writes only to
+    /// `/agent/scratch/**`. Operations that violate the policy will fail with a
+    /// permission error.
     ///
     /// # Example
     ///
@@ -451,6 +458,9 @@ impl AgentSandbox {
     /// If the script invokes a tool via the `tool` builtin, this method returns
     /// [`ExecutionOutcome::ToolRequest`] with the tool details. The orchestrator
     /// should execute the tool and call [`write_tool_result`] to record the result.
+    ///
+    /// Like [`execute`](Self::execute), filesystem access is controlled by any
+    /// policy configured via [`AgentSandboxBuilder::policy`].
     ///
     /// # Example
     ///
