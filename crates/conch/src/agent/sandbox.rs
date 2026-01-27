@@ -7,7 +7,8 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use eryx_vfs::{DirPerms, FilePerms, InMemoryStorage, VfsStorage};
+use async_trait::async_trait;
+use eryx_vfs::{DirEntry, DirPerms, FilePerms, InMemoryStorage, Metadata, VfsResult, VfsStorage};
 
 use super::continuation::{
     ExecutionOutcome, TOOL_REQUEST_EXIT_CODE, ToolResult, write_tool_result,
@@ -16,8 +17,71 @@ use super::history::HistoryProvider;
 use super::tools::ToolDefinition;
 use super::vfs::AgentVfs;
 use crate::limits::ResourceLimits;
+use crate::policy::{PolicyHandler, PolicyStorage};
 use crate::runtime::{ExecutionResult, RuntimeError};
 use crate::shell::{Mount, Shell};
+
+/// A sized wrapper around `Arc<dyn VfsStorage>` that implements `VfsStorage`.
+///
+/// This allows us to use dynamic dispatch for VFS storage while still being
+/// compatible with APIs that require `Sized` types.
+#[derive(Clone)]
+struct DynStorage(Arc<dyn VfsStorage>);
+
+#[async_trait]
+impl VfsStorage for DynStorage {
+    async fn read(&self, path: &str) -> VfsResult<Vec<u8>> {
+        self.0.read(path).await
+    }
+
+    async fn read_at(&self, path: &str, offset: u64, len: u64) -> VfsResult<Vec<u8>> {
+        self.0.read_at(path, offset, len).await
+    }
+
+    async fn write(&self, path: &str, data: &[u8]) -> VfsResult<()> {
+        self.0.write(path, data).await
+    }
+
+    async fn write_at(&self, path: &str, offset: u64, data: &[u8]) -> VfsResult<()> {
+        self.0.write_at(path, offset, data).await
+    }
+
+    async fn set_size(&self, path: &str, size: u64) -> VfsResult<()> {
+        self.0.set_size(path, size).await
+    }
+
+    async fn delete(&self, path: &str) -> VfsResult<()> {
+        self.0.delete(path).await
+    }
+
+    async fn exists(&self, path: &str) -> VfsResult<bool> {
+        self.0.exists(path).await
+    }
+
+    async fn list(&self, path: &str) -> VfsResult<Vec<DirEntry>> {
+        self.0.list(path).await
+    }
+
+    async fn stat(&self, path: &str) -> VfsResult<Metadata> {
+        self.0.stat(path).await
+    }
+
+    async fn mkdir(&self, path: &str) -> VfsResult<()> {
+        self.0.mkdir(path).await
+    }
+
+    async fn rmdir(&self, path: &str) -> VfsResult<()> {
+        self.0.rmdir(path).await
+    }
+
+    async fn rename(&self, from: &str, to: &str) -> VfsResult<()> {
+        self.0.rename(from, to).await
+    }
+
+    fn mkdir_sync(&self, path: &str) -> VfsResult<()> {
+        self.0.mkdir_sync(path)
+    }
+}
 
 /// Configuration for a workspace mount.
 #[derive(Debug, Clone)]
@@ -55,6 +119,7 @@ pub struct AgentSandboxBuilder {
     tools: Vec<ToolDefinition>,
     workspace_mounts: Vec<WorkspaceMount>,
     history: Option<Arc<dyn HistoryProvider>>,
+    policy: Option<Arc<dyn PolicyHandler>>,
 }
 
 impl std::fmt::Debug for AgentSandboxBuilder {
@@ -68,6 +133,7 @@ impl std::fmt::Debug for AgentSandboxBuilder {
             .field("tools", &self.tools)
             .field("workspace_mounts", &self.workspace_mounts)
             .field("has_history", &self.history.is_some())
+            .field("has_policy", &self.policy.is_some())
             .finish()
     }
 }
@@ -84,6 +150,7 @@ impl AgentSandboxBuilder {
             tools: Vec::new(),
             workspace_mounts: Vec::new(),
             history: None,
+            policy: None,
         }
     }
 
@@ -159,6 +226,50 @@ impl AgentSandboxBuilder {
         self
     }
 
+    /// Set a policy handler for filesystem access control.
+    ///
+    /// The policy enforces security boundaries on what the agent can read/write,
+    /// regardless of the script being executed. This provides defense-in-depth:
+    /// even if a script is malicious, it can only access what the policy allows.
+    ///
+    /// If no policy is set, all operations are allowed (backward compatible).
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use conch::policy::{PolicyBuilder, agent_sandbox_policy};
+    ///
+    /// // Use the standard agent sandbox policy
+    /// let sandbox = AgentSandbox::builder("agent-123")
+    ///     .policy(agent_sandbox_policy())
+    ///     .build()
+    ///     .await?;
+    ///
+    /// // Or create a custom policy
+    /// let policy = PolicyBuilder::new()
+    ///     .allow_read("/agent/**")
+    ///     .allow_read("/tools/**")
+    ///     .allow_write("/agent/scratch/**")
+    ///     .build();
+    ///
+    /// let sandbox = AgentSandbox::builder("agent-123")
+    ///     .policy(policy)
+    ///     .build()
+    ///     .await?;
+    /// ```
+    pub fn policy(mut self, policy: impl PolicyHandler + 'static) -> Self {
+        self.policy = Some(Arc::new(policy));
+        self
+    }
+
+    /// Set a policy handler from an Arc.
+    ///
+    /// Use this when you want to share a policy across multiple sandboxes.
+    pub fn policy_arc(mut self, policy: Arc<dyn PolicyHandler>) -> Self {
+        self.policy = Some(policy);
+        self
+    }
+
     /// Build the sandbox with a custom VFS storage backend.
     ///
     /// # Errors
@@ -171,7 +282,11 @@ impl AgentSandboxBuilder {
         self,
         storage: S,
     ) -> Result<AgentSandbox, RuntimeError> {
-        // Build the AgentVfs with all configuration
+        // Convert to Arc<dyn VfsStorage> for dynamic dispatch
+        let storage: Arc<dyn VfsStorage> = Arc::new(storage);
+
+        // Build the AgentVfs with all configuration FIRST (before applying policy)
+        // This allows the initialization to write metadata, tools, etc.
         let mut vfs_builder = AgentVfs::builder(&self.agent_id);
 
         if let Some(name) = self.name {
@@ -192,15 +307,29 @@ impl AgentSandboxBuilder {
         }
 
         let agent_vfs = vfs_builder
-            .build(storage)
+            .build(DynStorage(Arc::clone(&storage)))
             .await
             .map_err(|e| RuntimeError::Vfs(e.to_string()))?;
 
         let agent_vfs = Arc::new(agent_vfs);
 
-        // Build the Shell with the agent VFS
+        // Now wrap with policy if configured
+        // The policy applies to the storage that will be used for shell execution,
+        // not for the initial VFS setup which has already completed.
+        let shell_storage: Arc<dyn VfsStorage> = match self.policy {
+            Some(policy) => {
+                // PolicyStorage wraps the storage with policy enforcement
+                Arc::new(PolicyStorage::new(storage, policy))
+            }
+            None => {
+                // No policy - use storage directly
+                storage
+            }
+        };
+
+        // Build the Shell with the (optionally policy-wrapped) storage
         let mut shell_builder = Shell::builder()
-            .vfs_arc(agent_vfs.storage_arc())
+            .vfs_arc(shell_storage)
             // Mount all agent-related paths
             .vfs_path("/agent", DirPerms::all(), FilePerms::all())
             // /tools is mostly read-only, but /tools/pending needs write access for tool requests
@@ -1007,5 +1136,193 @@ A> Based on the search results, here's what I found about Rust async patterns...
         assert_eq!(result.exit_code, 0);
         let stdout = String::from_utf8_lossy(&result.stdout);
         assert!(stdout.contains("web_search"), "Should find tool call");
+    }
+
+    // Policy integration tests
+    mod policy_tests {
+        use super::*;
+        use crate::policy::{PolicyBuilder, agent_sandbox_policy};
+
+        #[tokio::test]
+        async fn test_sandbox_with_policy_allows_agent_reads() {
+            // Use the standard agent sandbox policy
+            let sandbox = AgentSandbox::builder("agent-123")
+                .policy(agent_sandbox_policy())
+                .build()
+                .await
+                .expect("Failed to build sandbox");
+
+            // Should be able to read /agent/metadata.json
+            let result = sandbox
+                .execute("cat /agent/metadata.json", &default_limits())
+                .await
+                .expect("Execute failed");
+
+            assert_eq!(
+                result.exit_code,
+                0,
+                "Should allow reading /agent/metadata.json. stderr: {}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+        }
+
+        #[tokio::test]
+        async fn test_sandbox_with_policy_allows_tools_reads() {
+            let sandbox = AgentSandbox::builder("agent-123")
+                .tool(ToolDefinition::no_params("test_tool", "A test tool"))
+                .policy(agent_sandbox_policy())
+                .build()
+                .await
+                .expect("Failed to build sandbox");
+
+            // Should be able to read /tools/index.txt
+            let result = sandbox
+                .execute("cat /tools/index.txt", &default_limits())
+                .await
+                .expect("Execute failed");
+
+            assert_eq!(
+                result.exit_code,
+                0,
+                "Should allow reading /tools/index.txt. stderr: {}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert!(String::from_utf8_lossy(&result.stdout).contains("test_tool"));
+        }
+
+        #[tokio::test]
+        async fn test_sandbox_with_policy_allows_scratch_writes() {
+            let sandbox = AgentSandbox::builder("agent-123")
+                .policy(agent_sandbox_policy())
+                .build()
+                .await
+                .expect("Failed to build sandbox");
+
+            // Should be able to write to /agent/scratch/
+            let result = sandbox
+                .execute(
+                    "echo 'test data' > /agent/scratch/output.txt",
+                    &default_limits(),
+                )
+                .await
+                .expect("Execute failed");
+
+            assert_eq!(
+                result.exit_code,
+                0,
+                "Should allow writing to /agent/scratch/. stderr: {}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+
+            // Verify the write worked
+            let result = sandbox
+                .execute("cat /agent/scratch/output.txt", &default_limits())
+                .await
+                .expect("Execute failed");
+            assert!(String::from_utf8_lossy(&result.stdout).contains("test data"));
+        }
+
+        #[tokio::test]
+        async fn test_sandbox_with_policy_denies_write_to_agent_root() {
+            let sandbox = AgentSandbox::builder("agent-123")
+                .policy(agent_sandbox_policy())
+                .build()
+                .await
+                .expect("Failed to build sandbox");
+
+            // Should NOT be able to write to /agent/metadata.json (outside scratch)
+            let result = sandbox
+                .execute("echo 'malicious' > /agent/metadata.json", &default_limits())
+                .await
+                .expect("Execute failed");
+
+            // The command should fail (non-zero exit code) because write is denied
+            assert_ne!(
+                result.exit_code, 0,
+                "Should deny writing to /agent/metadata.json"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_sandbox_with_custom_policy() {
+            // Create a custom policy that only allows reading /agent/params.json
+            let policy = PolicyBuilder::new()
+                .allow_read("/agent/params.json")
+                .allow_read("/agent")
+                .build();
+
+            let sandbox = AgentSandbox::builder("agent-123")
+                .params(serde_json::json!({"task": "test"}))
+                .policy(policy)
+                .build()
+                .await
+                .expect("Failed to build sandbox");
+
+            // Should be able to read /agent/params.json
+            let result = sandbox
+                .execute("cat /agent/params.json", &default_limits())
+                .await
+                .expect("Execute failed");
+
+            assert_eq!(
+                result.exit_code, 0,
+                "Should allow reading /agent/params.json"
+            );
+
+            // Should NOT be able to read /agent/metadata.json (not in policy)
+            let result = sandbox
+                .execute("cat /agent/metadata.json", &default_limits())
+                .await
+                .expect("Execute failed");
+
+            assert_ne!(
+                result.exit_code, 0,
+                "Should deny reading /agent/metadata.json"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_sandbox_without_policy_allows_everything() {
+            // No policy = allow all (backward compatible)
+            let sandbox = AgentSandbox::builder("agent-123")
+                .build()
+                .await
+                .expect("Failed to build sandbox");
+
+            // Should be able to write anywhere
+            let result = sandbox
+                .execute("echo 'data' > /agent/metadata.json", &default_limits())
+                .await
+                .expect("Execute failed");
+
+            // Without policy, this should succeed
+            assert_eq!(
+                result.exit_code, 0,
+                "Without policy, should allow all writes"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_policy_shared_across_invocations() {
+            let sandbox = AgentSandbox::builder("agent-123")
+                .policy(agent_sandbox_policy())
+                .build()
+                .await
+                .expect("Failed to build sandbox");
+
+            // Multiple executions should all be governed by the same policy
+            for i in 0..3 {
+                let result = sandbox
+                    .execute("cat /agent/params.json", &default_limits())
+                    .await
+                    .expect("Execute failed");
+
+                assert_eq!(
+                    result.exit_code, 0,
+                    "Execution {} should succeed with policy",
+                    i
+                );
+            }
+        }
     }
 }

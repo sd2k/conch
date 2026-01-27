@@ -28,6 +28,7 @@ serde_json = "1"
 # Shell builtins (for WASM guest)
 regex-lite = "0.1"
 globset = "0.4"
+glob = "0.3"
 
 # Parsing - tree-sitter
 tree-sitter = "0.25"
