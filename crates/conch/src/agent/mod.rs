@@ -42,10 +42,15 @@
 //! let index = vfs.read("/tools/index.txt").await?;
 //! ```
 
+mod continuation;
 mod sandbox;
 mod tools;
 mod vfs;
 
+pub use continuation::{
+    ExecutionOutcome, TOOL_REQUEST_EXIT_CODE, ToolRequest, ToolResult, find_pending_request,
+    parse_pending_request, write_tool_result,
+};
 pub use sandbox::{AgentSandbox, AgentSandboxBuilder};
 pub use tools::{ToolDefinition, ToolRegistry, ToolSummary, VecToolRegistry, generate_index_txt};
 pub use vfs::{AgentMetadata, AgentVfs, AgentVfsBuilder};

@@ -35,10 +35,9 @@ use brush_core::{ExecutionContext, ExecutionResult, ShellExtensions, builtins, e
 
 /// Exit code used to signal a tool invocation request.
 ///
-/// When the sandbox sees this exit code, it checks for a pending tool request
-/// in `/tools/pending/` and yields to the orchestrator.
-#[allow(dead_code)] // Used in Session 5 when yield mechanism is implemented
-pub const TOOL_REQUEST_EXIT_CODE: i32 = 42;
+/// When the sandbox sees this exit code, it parses stdout as a tool request
+/// JSON and yields to the orchestrator.
+pub const TOOL_REQUEST_EXIT_CODE: u8 = 42;
 
 /// The tool builtin command.
 pub struct ToolCommand;
@@ -114,16 +113,17 @@ impl builtins::SimpleCommand for ToolCommand {
             stdin: stdin_data,
         };
 
-        // Output the request as JSON
+        // Output the request as JSON to stdout
+        // The orchestrator (AgentSandbox) will:
+        // 1. Detect the exit code 42
+        // 2. Parse stdout as a ToolRequest
+        // 3. Write to /tools/pending/<call_id>/request.json
         let output = build_request_json(&request);
         writeln!(context.stdout(), "{}", output)?;
         context.stdout().flush()?;
 
-        // For now, just return success with the request output
-        // In the full implementation (Session 5), this will:
-        // 1. Write request to /tools/pending/<call_id>/request.json
-        // 2. Exit with TOOL_REQUEST_EXIT_CODE to signal yield
-        Ok(ExecutionResult::new(0))
+        // Exit with TOOL_REQUEST_EXIT_CODE to signal yield to orchestrator
+        Ok(ExecutionResult::new(TOOL_REQUEST_EXIT_CODE))
     }
 }
 
