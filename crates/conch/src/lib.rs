@@ -26,6 +26,7 @@
 //! ).await?;
 //! ```
 
+pub mod agent;
 mod executor;
 mod limits;
 mod runtime;
