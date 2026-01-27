@@ -29,11 +29,94 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use eryx_vfs::{DirPerms, FilePerms, HybridVfsCtx, InMemoryStorage, RealDir, VfsStorage};
+use async_trait::async_trait;
+use eryx_vfs::{
+    DirEntry, DirPerms, FilePerms, HybridVfsCtx, InMemoryStorage, Metadata, RealDir, VfsResult,
+    VfsStorage,
+};
 
 use crate::executor::ComponentShellExecutor;
 use crate::limits::ResourceLimits;
 use crate::runtime::{ExecutionResult, RuntimeError};
+
+/// A sized wrapper around `Arc<dyn VfsStorage>` that implements `VfsStorage`.
+///
+/// This allows us to use dynamic dispatch for VFS storage while still being
+/// compatible with APIs that require `Sized` types (like `HybridVfsCtx<S>`).
+#[derive(Clone)]
+pub struct DynVfsStorage(Arc<dyn VfsStorage>);
+
+impl DynVfsStorage {
+    /// Create a new `DynVfsStorage` from any `VfsStorage` implementation.
+    pub fn new(storage: impl VfsStorage + 'static) -> Self {
+        Self(Arc::new(storage))
+    }
+
+    /// Create a new `DynVfsStorage` from an existing `Arc<dyn VfsStorage>`.
+    pub fn from_arc(storage: Arc<dyn VfsStorage>) -> Self {
+        Self(storage)
+    }
+
+    /// Get a reference to the underlying storage.
+    pub fn inner(&self) -> &dyn VfsStorage {
+        &*self.0
+    }
+}
+
+#[async_trait]
+impl VfsStorage for DynVfsStorage {
+    async fn read(&self, path: &str) -> VfsResult<Vec<u8>> {
+        self.0.read(path).await
+    }
+
+    async fn read_at(&self, path: &str, offset: u64, len: u64) -> VfsResult<Vec<u8>> {
+        self.0.read_at(path, offset, len).await
+    }
+
+    async fn write(&self, path: &str, data: &[u8]) -> VfsResult<()> {
+        self.0.write(path, data).await
+    }
+
+    async fn write_at(&self, path: &str, offset: u64, data: &[u8]) -> VfsResult<()> {
+        self.0.write_at(path, offset, data).await
+    }
+
+    async fn set_size(&self, path: &str, size: u64) -> VfsResult<()> {
+        self.0.set_size(path, size).await
+    }
+
+    async fn delete(&self, path: &str) -> VfsResult<()> {
+        self.0.delete(path).await
+    }
+
+    async fn exists(&self, path: &str) -> VfsResult<bool> {
+        self.0.exists(path).await
+    }
+
+    async fn list(&self, path: &str) -> VfsResult<Vec<DirEntry>> {
+        self.0.list(path).await
+    }
+
+    async fn stat(&self, path: &str) -> VfsResult<Metadata> {
+        self.0.stat(path).await
+    }
+
+    async fn mkdir(&self, path: &str) -> VfsResult<()> {
+        self.0.mkdir(path).await
+    }
+
+    async fn rmdir(&self, path: &str) -> VfsResult<()> {
+        self.0.rmdir(path).await
+    }
+
+    async fn rename(&self, from: &str, to: &str) -> VfsResult<()> {
+        self.0.rename(from, to).await
+    }
+
+    fn mkdir_sync(&self, path: &str) -> VfsResult<()> {
+        self.0.mkdir_sync(path)
+    }
+}
 
 /// Mount permissions for real filesystem paths.
 #[derive(Debug, Clone)]
@@ -97,14 +180,14 @@ struct RealMount {
 ///     .vfs_path("/data", DirPerms::READ, FilePerms::READ)
 ///     .build()?;
 /// ```
-pub struct ShellBuilder<S: VfsStorage + 'static = InMemoryStorage> {
-    vfs: Option<Arc<S>>,
+pub struct ShellBuilder {
+    vfs: Option<DynVfsStorage>,
     vfs_mounts: Vec<VfsMount>,
     real_mounts: Vec<RealMount>,
     executor: Option<ComponentShellExecutor>,
 }
 
-impl<S: VfsStorage + 'static> std::fmt::Debug for ShellBuilder<S> {
+impl std::fmt::Debug for ShellBuilder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ShellBuilder")
             .field("has_vfs", &self.vfs.is_some())
@@ -115,13 +198,13 @@ impl<S: VfsStorage + 'static> std::fmt::Debug for ShellBuilder<S> {
     }
 }
 
-impl Default for ShellBuilder<InMemoryStorage> {
+impl Default for ShellBuilder {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl ShellBuilder<InMemoryStorage> {
+impl ShellBuilder {
     /// Create a new shell builder with default settings.
     ///
     /// Uses [`InMemoryStorage`] for VFS by default.
@@ -133,29 +216,17 @@ impl ShellBuilder<InMemoryStorage> {
             executor: None,
         }
     }
-}
 
-impl<S: VfsStorage + 'static> ShellBuilder<S> {
     /// Set a custom VFS storage backend.
-    ///
-    /// This changes the storage type of the builder.
-    pub fn vfs<T: VfsStorage + 'static>(self, storage: T) -> ShellBuilder<T> {
-        ShellBuilder {
-            vfs: Some(Arc::new(storage)),
-            vfs_mounts: self.vfs_mounts,
-            real_mounts: self.real_mounts,
-            executor: self.executor,
-        }
+    pub fn vfs(mut self, storage: impl VfsStorage + 'static) -> Self {
+        self.vfs = Some(DynVfsStorage::new(storage));
+        self
     }
 
     /// Set a custom VFS storage backend from an Arc.
-    pub fn vfs_arc<T: VfsStorage + 'static>(self, storage: Arc<T>) -> ShellBuilder<T> {
-        ShellBuilder {
-            vfs: Some(storage),
-            vfs_mounts: self.vfs_mounts,
-            real_mounts: self.real_mounts,
-            executor: self.executor,
-        }
+    pub fn vfs_arc(mut self, storage: Arc<dyn VfsStorage>) -> Self {
+        self.vfs = Some(DynVfsStorage::from_arc(storage));
+        self
     }
 
     /// Add a VFS path (backed by virtual storage).
@@ -208,70 +279,11 @@ impl<S: VfsStorage + 'static> ShellBuilder<S> {
     /// Returns an error if:
     /// - A real filesystem mount path doesn't exist or can't be opened
     /// - The executor fails to initialize
-    pub fn build(self) -> Result<Shell<S>, RuntimeError>
-    where
-        S: Default,
-    {
-        // Use provided VFS or create default
-        let vfs: Arc<S> = self.vfs.unwrap_or_else(|| Arc::new(S::default()));
-
-        // Collect VFS mounts, adding default /scratch if none specified
-        let vfs_mounts = if self.vfs_mounts.is_empty() {
-            vec![VfsMount {
-                guest_path: "/scratch".to_string(),
-                dir_perms: DirPerms::all(),
-                file_perms: FilePerms::all(),
-            }]
-        } else {
-            self.vfs_mounts
-        };
-
-        // Create VFS directories in storage so they exist for direct access
-        for mount in &vfs_mounts {
-            if let Err(e) = vfs.mkdir_sync(&mount.guest_path) {
-                tracing::warn!("Failed to create VFS directory {}: {}", mount.guest_path, e);
-            }
-        }
-
-        // Get or create executor
-        let executor = match self.executor {
-            Some(e) => e,
-            None => {
-                #[cfg(feature = "embedded-shell")]
-                {
-                    ComponentShellExecutor::embedded()?
-                }
-                #[cfg(not(feature = "embedded-shell"))]
-                {
-                    return Err(RuntimeError::Wasm(
-                        "No executor provided and embedded-shell feature not enabled".to_string(),
-                    ));
-                }
-            }
-        };
-
-        Ok(Shell {
-            executor,
-            vfs,
-            vfs_mounts,
-            real_mounts: self.real_mounts,
-        })
-    }
-
-    /// Build the shell with a pre-provided VFS storage.
-    ///
-    /// Use this when you've already called `.vfs()` or `.vfs_arc()`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - No VFS storage was provided
-    /// - A real filesystem mount path doesn't exist or can't be opened
-    /// - The executor fails to initialize
-    pub fn build_with_vfs(self) -> Result<Shell<S>, RuntimeError> {
+    pub fn build(self) -> Result<Shell, RuntimeError> {
+        // Use provided VFS or create default InMemoryStorage
         let vfs = self
             .vfs
-            .ok_or_else(|| RuntimeError::Wasm("No VFS storage provided".to_string()))?;
+            .unwrap_or_else(|| DynVfsStorage::new(InMemoryStorage::new()));
 
         // Collect VFS mounts, adding default /scratch if none specified
         let vfs_mounts = if self.vfs_mounts.is_empty() {
@@ -323,9 +335,6 @@ impl<S: VfsStorage + 'static> ShellBuilder<S> {
 /// orchestrator-controlled data) with optional real filesystem mounts (for
 /// host directory access via cap-std).
 ///
-/// The type parameter `S` is the VFS storage backend. Use [`InMemoryStorage`]
-/// for the default in-memory implementation.
-///
 /// # Example
 ///
 /// ```rust,ignore
@@ -339,14 +348,14 @@ impl<S: VfsStorage + 'static> ShellBuilder<S> {
 /// // Execute commands
 /// let result = shell.execute("cat /scratch/data.txt", &limits).await?;
 /// ```
-pub struct Shell<S: VfsStorage + 'static = InMemoryStorage> {
+pub struct Shell {
     executor: ComponentShellExecutor,
-    vfs: Arc<S>,
+    vfs: DynVfsStorage,
     vfs_mounts: Vec<VfsMount>,
     real_mounts: Vec<RealMount>,
 }
 
-impl<S: VfsStorage + 'static> std::fmt::Debug for Shell<S> {
+impl std::fmt::Debug for Shell {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Shell")
             .field("vfs_mounts", &self.vfs_mounts)
@@ -355,27 +364,25 @@ impl<S: VfsStorage + 'static> std::fmt::Debug for Shell<S> {
     }
 }
 
-impl Shell<InMemoryStorage> {
+impl Shell {
     /// Create a new shell builder with default settings.
-    pub fn builder() -> ShellBuilder<InMemoryStorage> {
+    pub fn builder() -> ShellBuilder {
         ShellBuilder::new()
     }
-}
 
-impl<S: VfsStorage + 'static> Shell<S> {
     /// Get access to the VFS storage.
     ///
     /// This allows the orchestrator to read/write data that will be visible
     /// to commands executed in the shell.
-    pub fn vfs(&self) -> &S {
-        &self.vfs
+    pub fn vfs(&self) -> &dyn VfsStorage {
+        self.vfs.inner()
     }
 
     /// Get access to the VFS storage as an Arc.
     ///
     /// Useful when you need to share the VFS with other components.
-    pub fn vfs_arc(&self) -> Arc<S> {
-        Arc::clone(&self.vfs)
+    pub fn vfs_arc(&self) -> Arc<dyn VfsStorage> {
+        Arc::clone(&self.vfs.0)
     }
 
     /// Execute a shell script.
@@ -397,7 +404,8 @@ impl<S: VfsStorage + 'static> Shell<S> {
         limits: &ResourceLimits,
     ) -> Result<ExecutionResult, RuntimeError> {
         // Build HybridVfsCtx for this execution
-        let mut hybrid_ctx = HybridVfsCtx::new(Arc::clone(&self.vfs));
+        // Wrap DynVfsStorage in Arc for HybridVfsCtx (DynVfsStorage is Sized + VfsStorage)
+        let mut hybrid_ctx = HybridVfsCtx::new(Arc::new(self.vfs.clone()));
 
         // Add VFS mounts
         for mount in &self.vfs_mounts {
@@ -515,7 +523,7 @@ mod tests {
         let storage = InMemoryStorage::new();
         let shell = Shell::builder()
             .vfs(storage)
-            .build_with_vfs()
+            .build()
             .expect("Failed to build shell");
 
         let limits = ResourceLimits::default();

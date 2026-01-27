@@ -4,7 +4,7 @@
 //!
 //! Run with: cargo run -p conch --example basic --features embedded-shell
 
-use conch::{ResourceLimits, Shell, VfsStorage};
+use conch::{ResourceLimits, Shell};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

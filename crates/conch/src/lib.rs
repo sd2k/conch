@@ -39,9 +39,6 @@ pub mod ffi;
 // Core Shell API
 pub use shell::{Mount, Shell, ShellBuilder};
 
-/// Type alias for a shell with the default in-memory storage.
-pub type DefaultShell = Shell<InMemoryStorage>;
-
 // Executor (for advanced usage)
 pub use executor::ComponentShellExecutor;
 

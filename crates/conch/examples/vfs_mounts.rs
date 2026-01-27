@@ -4,7 +4,7 @@
 //!
 //! Run with: cargo run -p conch --example vfs_mounts --features embedded-shell
 
-use conch::{DirPerms, FilePerms, Mount, ResourceLimits, Shell, VfsStorage};
+use conch::{DirPerms, FilePerms, Mount, ResourceLimits, Shell};
 use std::env;
 use std::fs;
 
