@@ -42,8 +42,10 @@
 //! let index = vfs.read("/tools/index.txt").await?;
 //! ```
 
+mod sandbox;
 mod tools;
 mod vfs;
 
+pub use sandbox::{AgentSandbox, AgentSandboxBuilder};
 pub use tools::{ToolDefinition, ToolRegistry, ToolSummary, VecToolRegistry, generate_index_txt};
 pub use vfs::{AgentMetadata, AgentVfs, AgentVfsBuilder};
