@@ -19,6 +19,13 @@
 //! ├── available/       - Full tool definitions (JSON schema)
 //! ├── pending/         - Tools currently executing
 //! └── history/         - Completed tool calls
+//!
+//! /history/            - Conversation history (read-only)
+//! ├── index.txt        - List of available conversations
+//! ├── current/         - Current conversation
+//! │   ├── transcript.md
+//! │   └── metadata.json
+//! └── <conv_id>/       - Historical conversations
 //! ```
 //!
 //! # Example
@@ -43,6 +50,7 @@
 //! ```
 
 mod continuation;
+mod history;
 mod sandbox;
 mod tools;
 mod vfs;
@@ -50,6 +58,11 @@ mod vfs;
 pub use continuation::{
     ExecutionOutcome, TOOL_REQUEST_EXIT_CODE, ToolRequest, ToolResult, find_pending_request,
     parse_pending_request, write_tool_result,
+};
+pub use history::{
+    ConversationMetadata, ConversationSummary, HistoryProvider, SimpleHistoryProvider,
+    format_assistant_message, format_tool_call, format_tool_result, format_user_message,
+    generate_history_index, parse_transcript_stats,
 };
 pub use sandbox::{AgentSandbox, AgentSandboxBuilder};
 pub use tools::{ToolDefinition, ToolRegistry, ToolSummary, VecToolRegistry, generate_index_txt};
