@@ -15,7 +15,8 @@ use std::sync::Arc;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create a shared storage instance
-    let storage = Arc::new(InMemoryStorage::new());
+    // Note: We use Arc<dyn VfsStorage> for sharing between shells
+    let storage: Arc<dyn VfsStorage> = Arc::new(InMemoryStorage::new());
 
     // Create the scratch directory first
     storage.mkdir("/scratch").await?;
@@ -35,9 +36,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Create first shell using the shared storage
-    let shell1 = Shell::builder()
-        .vfs_arc(Arc::clone(&storage))
-        .build_with_vfs()?;
+    let shell1 = Shell::builder().vfs_arc(Arc::clone(&storage)).build()?;
 
     println!("\n=== Shell 1: Read and process data ===");
     let result = shell1
@@ -61,9 +60,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(result.exit_code, 0, "Shell 1 write failed");
 
     // Create second shell using the same storage - it sees shell1's output
-    let shell2 = Shell::builder()
-        .vfs_arc(Arc::clone(&storage))
-        .build_with_vfs()?;
+    let shell2 = Shell::builder().vfs_arc(Arc::clone(&storage)).build()?;
 
     println!("\n=== Shell 2: Sees Shell 1's output ===");
     let result = shell2

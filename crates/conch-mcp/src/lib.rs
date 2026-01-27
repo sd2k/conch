@@ -27,7 +27,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use conch::{InMemoryStorage, Mount, ResourceLimits, Shell};
+use conch::{Mount, ResourceLimits, Shell};
 use rmcp::{
     ErrorData as McpError, ServerHandler,
     model::*,
@@ -70,7 +70,7 @@ pub struct ExecuteParams {
 
 /// MCP Server that provides sandboxed shell execution via Conch
 pub struct ConchServer {
-    shell: Arc<Shell<InMemoryStorage>>,
+    shell: Arc<Shell>,
     semaphore: Arc<Semaphore>,
     mount_descriptions: Vec<String>,
 }
