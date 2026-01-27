@@ -28,6 +28,9 @@ pub enum RuntimeError {
     /// IO error
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+    /// VFS error
+    #[error("VFS error: {0}")]
+    Vfs(String),
 }
 
 /// Statistics about shell execution
