@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use eryx_vfs::{DirEntry, Metadata, VfsResult, VfsStorage};
 use serde::{Deserialize, Serialize};
 
+use super::history::{HistoryProvider, generate_history_index};
 use super::tools::{ToolDefinition, generate_index_txt};
 
 /// Metadata about the current agent.
@@ -45,7 +46,6 @@ pub struct AgentMetadata {
 ///     .build(InMemoryStorage::new())
 ///     .await?;
 /// ```
-#[derive(Debug)]
 pub struct AgentVfsBuilder {
     agent_id: String,
     name: Option<String>,
@@ -53,6 +53,21 @@ pub struct AgentVfsBuilder {
     capabilities: Vec<String>,
     params: Option<serde_json::Value>,
     tools: Vec<ToolDefinition>,
+    history: Option<Arc<dyn HistoryProvider>>,
+}
+
+impl std::fmt::Debug for AgentVfsBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentVfsBuilder")
+            .field("agent_id", &self.agent_id)
+            .field("name", &self.name)
+            .field("parent_id", &self.parent_id)
+            .field("capabilities", &self.capabilities)
+            .field("params", &self.params)
+            .field("tools", &self.tools)
+            .field("has_history", &self.history.is_some())
+            .finish()
+    }
 }
 
 impl AgentVfsBuilder {
@@ -65,6 +80,7 @@ impl AgentVfsBuilder {
             capabilities: Vec::new(),
             params: None,
             tools: Vec::new(),
+            history: None,
         }
     }
 
@@ -114,6 +130,15 @@ impl AgentVfsBuilder {
         self
     }
 
+    /// Set the history provider for conversation context.
+    ///
+    /// The history provider supplies conversation transcripts that are
+    /// accessible via `/history/` in the VFS.
+    pub fn history(mut self, provider: Arc<dyn HistoryProvider>) -> Self {
+        self.history = Some(provider);
+        self
+    }
+
     /// Build the [`AgentVfs`] with the given storage backend.
     ///
     /// This creates the agent directory structure and writes initial metadata.
@@ -154,6 +179,11 @@ impl AgentVfsBuilder {
 
         // Write tools index and definitions
         write_tools(&*storage, &self.tools).await?;
+
+        // Write history if provider is set
+        if let Some(history) = &self.history {
+            write_history(&*storage, history.as_ref()).await?;
+        }
 
         Ok(AgentVfs {
             storage,
@@ -246,6 +276,10 @@ async fn create_directory_structure(storage: &dyn VfsStorage) -> VfsResult<()> {
     mkdir_p(storage, "/tools/pending").await?;
     mkdir_p(storage, "/tools/history").await?;
 
+    // History directories
+    mkdir_p(storage, "/history").await?;
+    mkdir_p(storage, "/history/current").await?;
+
     Ok(())
 }
 
@@ -265,6 +299,62 @@ async fn write_tools(storage: &dyn VfsStorage, tools: &[ToolDefinition]) -> VfsR
             eryx_vfs::VfsError::Storage(format!("Failed to serialize tool {}: {e}", tool.name))
         })?;
         storage.write(&path, json.as_bytes()).await?;
+    }
+
+    Ok(())
+}
+
+/// Write conversation history to the filesystem.
+async fn write_history(storage: &dyn VfsStorage, history: &dyn HistoryProvider) -> VfsResult<()> {
+    // Write index.txt with conversation list
+    let conversations = history.list_conversations();
+    let index_content = generate_history_index(&conversations);
+    storage
+        .write("/history/index.txt", index_content.as_bytes())
+        .await?;
+
+    // Write current conversation if available
+    if let Some(transcript) = history.current_transcript() {
+        storage
+            .write("/history/current/transcript.md", transcript.as_bytes())
+            .await?;
+    }
+
+    if let Some(metadata) = history.current_metadata() {
+        let metadata_json = serde_json::to_string_pretty(&metadata).map_err(|e| {
+            eryx_vfs::VfsError::Storage(format!("Failed to serialize history metadata: {e}"))
+        })?;
+        storage
+            .write("/history/current/metadata.json", metadata_json.as_bytes())
+            .await?;
+    }
+
+    // Write historical conversations
+    for conv in &conversations {
+        if conv.is_current {
+            continue; // Already written above
+        }
+
+        let conv_dir = format!("/history/{}", conv.id);
+        mkdir_p(storage, &conv_dir).await?;
+
+        if let Some(transcript) = history.get_transcript(&conv.id) {
+            storage
+                .write(&format!("{conv_dir}/transcript.md"), transcript.as_bytes())
+                .await?;
+        }
+
+        if let Some(metadata) = history.get_metadata(&conv.id) {
+            let metadata_json = serde_json::to_string_pretty(&metadata).map_err(|e| {
+                eryx_vfs::VfsError::Storage(format!("Failed to serialize history metadata: {e}"))
+            })?;
+            storage
+                .write(
+                    &format!("{conv_dir}/metadata.json"),
+                    metadata_json.as_bytes(),
+                )
+                .await?;
+        }
     }
 
     Ok(())
