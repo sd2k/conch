@@ -9,6 +9,9 @@ use std::sync::Arc;
 
 use eryx_vfs::{DirPerms, FilePerms, InMemoryStorage, VfsStorage};
 
+use super::continuation::{
+    ExecutionOutcome, TOOL_REQUEST_EXIT_CODE, ToolResult, write_tool_result,
+};
 use super::tools::ToolDefinition;
 use super::vfs::AgentVfs;
 use crate::limits::ResourceLimits;
@@ -170,7 +173,8 @@ impl AgentSandboxBuilder {
             .vfs_arc(agent_vfs.storage_arc())
             // Mount all agent-related paths
             .vfs_path("/agent", DirPerms::all(), FilePerms::all())
-            .vfs_path("/tools", DirPerms::READ, FilePerms::READ);
+            // /tools is mostly read-only, but /tools/pending needs write access for tool requests
+            .vfs_path("/tools", DirPerms::all(), FilePerms::all());
 
         // Add workspace mounts
         for wm in self.workspace_mounts {
@@ -279,6 +283,116 @@ impl AgentSandbox {
         limits: &ResourceLimits,
     ) -> Result<ExecutionResult, RuntimeError> {
         self.shell.execute(script, limits).await
+    }
+
+    /// Execute a shell script, handling tool invocation requests.
+    ///
+    /// If the script invokes a tool via the `tool` builtin, this method returns
+    /// [`ExecutionOutcome::ToolRequest`] with the tool details. The orchestrator
+    /// should execute the tool and call [`write_tool_result`] to record the result.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let outcome = sandbox.execute_with_tools("tool web_search --query test", &limits).await?;
+    /// match outcome {
+    ///     ExecutionOutcome::Completed(result) => {
+    ///         println!("Script completed with exit code {}", result.exit_code);
+    ///     }
+    ///     ExecutionOutcome::ToolRequest(request) => {
+    ///         println!("Tool {} requested with params {:?}", request.tool, request.params);
+    ///         // Execute tool externally, then write result:
+    ///         // sandbox.write_tool_result(&request.call_id, ToolResult::success(value)).await?;
+    ///     }
+    /// }
+    /// ```
+    pub async fn execute_with_tools(
+        &self,
+        script: &str,
+        limits: &ResourceLimits,
+    ) -> Result<ExecutionOutcome, RuntimeError> {
+        use super::continuation::ToolRequest;
+
+        let result = self.shell.execute(script, limits).await?;
+
+        // Check if the script yielded for a tool request
+        if result.exit_code == TOOL_REQUEST_EXIT_CODE {
+            // Parse stdout as tool request JSON
+            // The tool builtin outputs: {"tool": "name", "params": {...}, "stdin": "..."}
+            let stdout = String::from_utf8_lossy(&result.stdout);
+
+            #[derive(serde::Deserialize)]
+            struct RawToolRequest {
+                tool: String,
+                params: serde_json::Value,
+                #[serde(default)]
+                stdin: Option<String>,
+                #[serde(default)]
+                stdin_bytes: Option<usize>,
+            }
+
+            let raw: RawToolRequest = serde_json::from_str(stdout.trim()).map_err(|e| {
+                RuntimeError::Vfs(format!("Failed to parse tool request from stdout: {e}"))
+            })?;
+
+            // Generate a call_id
+            let call_id = self.next_call_id();
+
+            // Create the full request
+            let request = ToolRequest {
+                call_id: call_id.clone(),
+                tool: raw.tool,
+                params: raw.params,
+                stdin: raw.stdin,
+                stdin_bytes: raw.stdin_bytes,
+            };
+
+            // Write to pending directory
+            let pending_dir = format!("/tools/pending/{call_id}");
+            self.vfs
+                .mkdir(&pending_dir)
+                .await
+                .map_err(|e| RuntimeError::Vfs(e.to_string()))?;
+
+            let request_json = serde_json::to_string_pretty(&request)
+                .map_err(|e| RuntimeError::Vfs(format!("Failed to serialize request: {e}")))?;
+            self.vfs
+                .write(
+                    &format!("{pending_dir}/request.json"),
+                    request_json.as_bytes(),
+                )
+                .await
+                .map_err(|e| RuntimeError::Vfs(e.to_string()))?;
+
+            return Ok(ExecutionOutcome::ToolRequest(request));
+        }
+
+        Ok(ExecutionOutcome::Completed(result))
+    }
+
+    /// Write a tool result to the VFS.
+    ///
+    /// After a tool request is fulfilled by the orchestrator, call this method
+    /// to record the result. The result is written to:
+    /// - `/tools/history/<call_id>/response.json` or `/tools/history/<call_id>/error.json`
+    /// - `/tools/last_result.json` (for easy script access)
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let outcome = sandbox.execute_with_tools("tool web_search --query test", &limits).await?;
+    /// if let ExecutionOutcome::ToolRequest(request) = outcome {
+    ///     // Execute tool externally...
+    ///     let result = ToolResult::success(serde_json::json!({"results": [...]}));
+    ///     sandbox.write_tool_result(&request.call_id, result).await?;
+    /// }
+    /// ```
+    pub async fn write_tool_result(
+        &self,
+        call_id: &str,
+        result: ToolResult,
+    ) -> Result<(), RuntimeError> {
+        write_tool_result(self.vfs.storage(), call_id, result).await
     }
 
     /// Generate the next tool call ID.
@@ -466,5 +580,277 @@ mod tests {
             .await
             .expect("Execute failed");
         assert!(!String::from_utf8_lossy(&result.stdout).contains("code_edit"));
+    }
+
+    #[tokio::test]
+    async fn test_tool_invocation_yields() {
+        let sandbox = AgentSandbox::builder("agent-123")
+            .tool(ToolDefinition::no_params("web_search", "Search the web"))
+            .build()
+            .await
+            .expect("Failed to build sandbox");
+
+        // Invoke a tool - should yield with ToolRequest
+        let outcome = sandbox
+            .execute_with_tools("tool web_search --query 'rust async'", &default_limits())
+            .await
+            .expect("Execute failed");
+
+        match outcome {
+            ExecutionOutcome::ToolRequest(request) => {
+                assert_eq!(request.tool, "web_search");
+                assert_eq!(request.params["query"], "rust async");
+                assert_eq!(request.call_id, "call-001");
+            }
+            ExecutionOutcome::Completed(result) => {
+                panic!(
+                    "Expected ToolRequest, got Completed with exit code {}",
+                    result.exit_code
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tool_request_written_to_pending() {
+        let sandbox = AgentSandbox::builder("agent-123")
+            .tool(ToolDefinition::no_params("analyze", "Analyze data"))
+            .build()
+            .await
+            .expect("Failed to build sandbox");
+
+        // Invoke a tool
+        let outcome = sandbox
+            .execute_with_tools("tool analyze --format json", &default_limits())
+            .await
+            .expect("Execute failed");
+
+        let request = match outcome {
+            ExecutionOutcome::ToolRequest(r) => r,
+            _ => panic!("Expected ToolRequest"),
+        };
+
+        // Verify request was written to pending directory
+        let pending_path = format!("/tools/pending/{}/request.json", request.call_id);
+        let pending_data = sandbox
+            .vfs()
+            .read(&pending_path)
+            .await
+            .expect("Should be able to read pending request");
+
+        let pending_json: serde_json::Value =
+            serde_json::from_slice(&pending_data).expect("Should parse as JSON");
+        assert_eq!(pending_json["tool"], "analyze");
+        assert_eq!(pending_json["params"]["format"], "json");
+    }
+
+    #[tokio::test]
+    async fn test_write_tool_result_success() {
+        let sandbox = AgentSandbox::builder("agent-123")
+            .tool(ToolDefinition::no_params("test_tool", "A test tool"))
+            .build()
+            .await
+            .expect("Failed to build sandbox");
+
+        // Invoke a tool
+        let outcome = sandbox
+            .execute_with_tools("tool test_tool --arg value", &default_limits())
+            .await
+            .expect("Execute failed");
+
+        let request = match outcome {
+            ExecutionOutcome::ToolRequest(r) => r,
+            _ => panic!("Expected ToolRequest"),
+        };
+
+        // Write successful result
+        let result_value = serde_json::json!({"status": "success", "data": [1, 2, 3]});
+        sandbox
+            .write_tool_result(&request.call_id, ToolResult::success(result_value.clone()))
+            .await
+            .expect("write_tool_result failed");
+
+        // Verify result was written to history
+        let history_path = format!("/tools/history/{}/response.json", request.call_id);
+        let history_data = sandbox
+            .vfs()
+            .read(&history_path)
+            .await
+            .expect("Should be able to read history response");
+
+        let history_json: serde_json::Value =
+            serde_json::from_slice(&history_data).expect("Should parse as JSON");
+        assert_eq!(history_json, result_value);
+
+        // Verify last_result.json was updated
+        let last_result = sandbox
+            .vfs()
+            .read("/tools/last_result.json")
+            .await
+            .expect("Should be able to read last_result");
+        let last_json: serde_json::Value =
+            serde_json::from_slice(&last_result).expect("Should parse as JSON");
+        assert_eq!(last_json, result_value);
+
+        // Verify pending was cleaned up
+        let pending_path = format!("/tools/pending/{}/request.json", request.call_id);
+        assert!(
+            sandbox.vfs().read(&pending_path).await.is_err(),
+            "Pending request should be deleted"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_write_tool_result_error() {
+        let sandbox = AgentSandbox::builder("agent-123")
+            .tool(ToolDefinition::no_params(
+                "failing_tool",
+                "A tool that fails",
+            ))
+            .build()
+            .await
+            .expect("Failed to build sandbox");
+
+        // Invoke a tool
+        let outcome = sandbox
+            .execute_with_tools("tool failing_tool", &default_limits())
+            .await
+            .expect("Execute failed");
+
+        let request = match outcome {
+            ExecutionOutcome::ToolRequest(r) => r,
+            _ => panic!("Expected ToolRequest"),
+        };
+
+        // Write error result
+        sandbox
+            .write_tool_result(&request.call_id, ToolResult::error("Tool execution failed"))
+            .await
+            .expect("write_tool_result failed");
+
+        // Verify error was written to history
+        let error_path = format!("/tools/history/{}/error.json", request.call_id);
+        let error_data = sandbox
+            .vfs()
+            .read(&error_path)
+            .await
+            .expect("Should be able to read history error");
+
+        let error_json: serde_json::Value =
+            serde_json::from_slice(&error_data).expect("Should parse as JSON");
+        assert_eq!(error_json["error"], "Tool execution failed");
+
+        // Verify metadata shows failure
+        let metadata_path = format!("/tools/history/{}/metadata.json", request.call_id);
+        let metadata_data = sandbox
+            .vfs()
+            .read(&metadata_path)
+            .await
+            .expect("Should be able to read metadata");
+        let metadata_json: serde_json::Value =
+            serde_json::from_slice(&metadata_data).expect("Should parse as JSON");
+        assert_eq!(metadata_json["success"], false);
+    }
+
+    #[tokio::test]
+    async fn test_full_tool_cycle() {
+        let sandbox = AgentSandbox::builder("agent-123")
+            .tool(ToolDefinition::no_params(
+                "calculator",
+                "Perform calculations",
+            ))
+            .build()
+            .await
+            .expect("Failed to build sandbox");
+
+        // Step 1: Agent invokes tool
+        let outcome = sandbox
+            .execute_with_tools(
+                "tool calculator --operation add --a 5 --b 3",
+                &default_limits(),
+            )
+            .await
+            .expect("Execute failed");
+
+        let request = match outcome {
+            ExecutionOutcome::ToolRequest(r) => r,
+            _ => panic!("Expected ToolRequest"),
+        };
+
+        assert_eq!(request.tool, "calculator");
+        assert_eq!(request.params["operation"], "add");
+        assert_eq!(request.params["a"], 5);
+        assert_eq!(request.params["b"], 3);
+
+        // Step 2: Orchestrator executes tool (simulated)
+        let tool_result = serde_json::json!({"result": 8});
+
+        // Step 3: Orchestrator writes result
+        sandbox
+            .write_tool_result(&request.call_id, ToolResult::success(tool_result))
+            .await
+            .expect("write_tool_result failed");
+
+        // Step 4: Agent can read result (in a new script execution)
+        let result = sandbox
+            .execute("cat /tools/last_result.json", &default_limits())
+            .await
+            .expect("Execute failed");
+
+        assert_eq!(result.exit_code, 0);
+        let stdout = String::from_utf8_lossy(&result.stdout);
+        assert!(stdout.contains("\"result\": 8"), "stdout: {}", stdout);
+    }
+
+    #[tokio::test]
+    async fn test_normal_execution_completes() {
+        let sandbox = AgentSandbox::builder("agent-123")
+            .build()
+            .await
+            .expect("Failed to build sandbox");
+
+        // Execute a normal command (no tool invocation)
+        let outcome = sandbox
+            .execute_with_tools("echo 'hello world'", &default_limits())
+            .await
+            .expect("Execute failed");
+
+        match outcome {
+            ExecutionOutcome::Completed(result) => {
+                assert_eq!(result.exit_code, 0);
+                assert!(String::from_utf8_lossy(&result.stdout).contains("hello world"));
+            }
+            ExecutionOutcome::ToolRequest(_) => {
+                panic!("Expected Completed, got ToolRequest");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tool_with_json_params() {
+        let sandbox = AgentSandbox::builder("agent-123")
+            .tool(ToolDefinition::no_params("code_edit", "Edit code"))
+            .build()
+            .await
+            .expect("Failed to build sandbox");
+
+        // Invoke tool with --json parameter
+        let outcome = sandbox
+            .execute_with_tools(
+                r#"tool code_edit --json '{"file": "src/main.rs", "changes": [{"line": 10, "text": "// fixed"}]}'"#,
+                &default_limits(),
+            )
+            .await
+            .expect("Execute failed");
+
+        match outcome {
+            ExecutionOutcome::ToolRequest(request) => {
+                assert_eq!(request.tool, "code_edit");
+                assert_eq!(request.params["file"], "src/main.rs");
+                assert!(request.params["changes"].is_array());
+                assert_eq!(request.params["changes"][0]["line"], 10);
+            }
+            _ => panic!("Expected ToolRequest"),
+        }
     }
 }
