@@ -56,5 +56,21 @@ required-features = ["embedded-shell"]
 name = "custom_storage"
 required-features = ["embedded-shell"]
 
+[[example]]
+name = "agent_sandbox"
+required-features = ["embedded-shell"]
+
+[[example]]
+name = "tool_execution"
+required-features = ["embedded-shell"]
+
+[[example]]
+name = "external_tools"
+required-features = ["embedded-shell"]
+
+[[test]]
+name = "agent_integration"
+required-features = ["embedded-shell"]
+
 [lints]
 workspace = true
