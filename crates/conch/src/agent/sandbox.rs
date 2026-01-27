@@ -12,6 +12,7 @@ use eryx_vfs::{DirPerms, FilePerms, InMemoryStorage, VfsStorage};
 use super::continuation::{
     ExecutionOutcome, TOOL_REQUEST_EXIT_CODE, ToolResult, write_tool_result,
 };
+use super::history::HistoryProvider;
 use super::tools::ToolDefinition;
 use super::vfs::AgentVfs;
 use crate::limits::ResourceLimits;
@@ -45,7 +46,6 @@ struct WorkspaceMount {
 ///
 /// let result = sandbox.execute("cat /agent/params.json", &limits).await?;
 /// ```
-#[derive(Debug)]
 pub struct AgentSandboxBuilder {
     agent_id: String,
     name: Option<String>,
@@ -54,6 +54,22 @@ pub struct AgentSandboxBuilder {
     params: Option<serde_json::Value>,
     tools: Vec<ToolDefinition>,
     workspace_mounts: Vec<WorkspaceMount>,
+    history: Option<Arc<dyn HistoryProvider>>,
+}
+
+impl std::fmt::Debug for AgentSandboxBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentSandboxBuilder")
+            .field("agent_id", &self.agent_id)
+            .field("name", &self.name)
+            .field("parent_id", &self.parent_id)
+            .field("capabilities", &self.capabilities)
+            .field("params", &self.params)
+            .field("tools", &self.tools)
+            .field("workspace_mounts", &self.workspace_mounts)
+            .field("has_history", &self.history.is_some())
+            .finish()
+    }
 }
 
 impl AgentSandboxBuilder {
@@ -67,6 +83,7 @@ impl AgentSandboxBuilder {
             params: None,
             tools: Vec::new(),
             workspace_mounts: Vec::new(),
+            history: None,
         }
     }
 
@@ -133,6 +150,15 @@ impl AgentSandboxBuilder {
         self
     }
 
+    /// Set the history provider for conversation context.
+    ///
+    /// The history provider supplies conversation transcripts accessible
+    /// via `/history/` in the VFS.
+    pub fn history(mut self, provider: Arc<dyn HistoryProvider>) -> Self {
+        self.history = Some(provider);
+        self
+    }
+
     /// Build the sandbox with a custom VFS storage backend.
     ///
     /// # Errors
@@ -161,6 +187,10 @@ impl AgentSandboxBuilder {
         vfs_builder = vfs_builder.capabilities(self.capabilities);
         vfs_builder = vfs_builder.tools(self.tools);
 
+        if let Some(history) = self.history {
+            vfs_builder = vfs_builder.history(history);
+        }
+
         let agent_vfs = vfs_builder
             .build(storage)
             .await
@@ -174,7 +204,9 @@ impl AgentSandboxBuilder {
             // Mount all agent-related paths
             .vfs_path("/agent", DirPerms::all(), FilePerms::all())
             // /tools is mostly read-only, but /tools/pending needs write access for tool requests
-            .vfs_path("/tools", DirPerms::all(), FilePerms::all());
+            .vfs_path("/tools", DirPerms::all(), FilePerms::all())
+            // /history is read-only for agents
+            .vfs_path("/history", DirPerms::READ, FilePerms::READ);
 
         // Add workspace mounts
         for wm in self.workspace_mounts {
@@ -852,5 +884,128 @@ mod tests {
             }
             _ => panic!("Expected ToolRequest"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_sandbox_with_history() {
+        use crate::agent::history::{ConversationMetadata, SimpleHistoryProvider};
+
+        let history = SimpleHistoryProvider::new()
+            .with_transcript("U> Hello, can you help me?\n\nA> Of course! What do you need?")
+            .with_metadata(ConversationMetadata {
+                id: "current".to_string(),
+                title: Some("Help request".to_string()),
+                started_at: "2024-01-01T00:00:00Z".to_string(),
+                updated_at: None,
+                user_message_count: 1,
+                assistant_message_count: 1,
+                tool_call_count: 0,
+            });
+
+        let sandbox = AgentSandbox::builder("agent-123")
+            .history(Arc::new(history))
+            .build()
+            .await
+            .expect("Failed to build sandbox");
+
+        // Read the transcript via shell command
+        let result = sandbox
+            .execute("cat /history/current/transcript.md", &default_limits())
+            .await
+            .expect("Execute failed");
+
+        assert_eq!(result.exit_code, 0);
+        let stdout = String::from_utf8_lossy(&result.stdout);
+        assert!(stdout.contains("U>"), "Should contain user marker");
+        assert!(stdout.contains("Hello"), "Should contain user message");
+        assert!(stdout.contains("A>"), "Should contain assistant marker");
+    }
+
+    #[tokio::test]
+    async fn test_sandbox_history_index() {
+        use crate::agent::history::{
+            ConversationMetadata, ConversationSummary, SimpleHistoryProvider,
+        };
+
+        let history = SimpleHistoryProvider::new()
+            .with_transcript("U> Current message")
+            .with_metadata(ConversationMetadata {
+                id: "current".to_string(),
+                title: Some("Current task".to_string()),
+                started_at: "2024-01-02T00:00:00Z".to_string(),
+                updated_at: None,
+                user_message_count: 1,
+                assistant_message_count: 0,
+                tool_call_count: 0,
+            })
+            .with_conversation(
+                ConversationSummary {
+                    id: "old-001".to_string(),
+                    title: "Previous task".to_string(),
+                    started_at: "2024-01-01T00:00:00Z".to_string(),
+                    message_count: 5,
+                    is_current: false,
+                },
+                "U> Old message\n\nA> Old response",
+                None,
+            );
+
+        let sandbox = AgentSandbox::builder("agent-123")
+            .history(Arc::new(history))
+            .build()
+            .await
+            .expect("Failed to build sandbox");
+
+        // Read the index
+        let result = sandbox
+            .execute("cat /history/index.txt", &default_limits())
+            .await
+            .expect("Execute failed");
+
+        assert_eq!(result.exit_code, 0);
+        let stdout = String::from_utf8_lossy(&result.stdout);
+        assert!(
+            stdout.contains("current (current)"),
+            "Should list current conversation"
+        );
+        assert!(
+            stdout.contains("old-001"),
+            "Should list historical conversation"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sandbox_history_grep() {
+        use crate::agent::history::SimpleHistoryProvider;
+
+        let transcript = r#"U> Can you search for information about Rust async patterns?
+
+A> I'll search for that information.
+
+T[web_search] {"query": "Rust async patterns"}
+R> {"results": [{"title": "Async in Rust", "url": "https://example.com"}]}
+
+A> Based on the search results, here's what I found about Rust async patterns..."#;
+
+        let history = SimpleHistoryProvider::new().with_transcript(transcript);
+
+        let sandbox = AgentSandbox::builder("agent-123")
+            .history(Arc::new(history))
+            .build()
+            .await
+            .expect("Failed to build sandbox");
+
+        // Grep for tool calls in the transcript
+        let result = sandbox
+            .execute(
+                "grep 'T\\[' /history/current/transcript.md",
+                &default_limits(),
+            )
+            .await
+            .expect("Execute failed");
+
+        assert_eq!(result.exit_code, 0);
+        let stdout = String::from_utf8_lossy(&result.stdout);
+        assert!(stdout.contains("web_search"), "Should find tool call");
     }
 }
