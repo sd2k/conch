@@ -135,7 +135,7 @@ pub trait HistoryProvider: Send + Sync {
 /// # Example
 ///
 /// ```rust
-/// use conch::agent::SimpleHistoryProvider;
+/// use conch::agent::{HistoryProvider, SimpleHistoryProvider};
 ///
 /// let history = SimpleHistoryProvider::new()
 ///     .with_transcript("U> Hello\n\nA> Hi there!");

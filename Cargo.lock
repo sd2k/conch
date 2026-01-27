@@ -644,6 +644,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "eryx-vfs",
+ "glob",
  "libc",
  "serde",
  "serde_json",
