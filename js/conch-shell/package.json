@@ -29,6 +29,10 @@
     "./stdin": {
       "types": "./stdin.d.ts",
       "default": "./stdin.js"
+    },
+    "./tool-handler": {
+      "types": "./tool-handler.d.ts",
+      "default": "./tool-handler.js"
     }
   },
   "keywords": [

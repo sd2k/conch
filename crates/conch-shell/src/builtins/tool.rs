@@ -23,28 +23,30 @@
 //! cat /workspace/data.json | tool analyze_data --format json
 //! ```
 //!
-//! # Output
+//! # Behavior
 //!
-//! The tool builtin writes a JSON request to stdout describing the tool invocation.
-//! In a full agent sandbox, this triggers a yield to the orchestrator.
+//! The tool builtin calls the host-provided `invoke-tool` function (defined in WIT)
+//! to execute the tool. The host can implement this synchronously or asynchronously
+//! (using jco's --async-imports flag for JSPI support).
+//!
+//! On success, the tool's output is written to stdout and exit code is 0.
+//! On failure, the error message is written to stderr and exit code is 1.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
 
 use brush_core::{ExecutionContext, ExecutionResult, ShellExtensions, builtins, error};
 
-/// Exit code used to signal a tool invocation request.
-///
-/// When the sandbox sees this exit code, it parses stdout as a tool request
-/// JSON and yields to the orchestrator.
-pub const TOOL_REQUEST_EXIT_CODE: u8 = 42;
+// Import the WIT-generated invoke_tool function and types
+#[cfg(target_family = "wasm")]
+use crate::{ToolRequest as WitToolRequest, invoke_tool};
 
 /// The tool builtin command.
 pub struct ToolCommand;
 
-/// Parsed tool invocation request.
+/// Parsed tool invocation request (internal representation).
 #[derive(Debug)]
-struct ToolRequest {
+struct ParsedToolRequest {
     /// Tool name to invoke.
     tool: String,
     /// Parameters for the tool.
@@ -107,28 +109,48 @@ impl builtins::SimpleCommand for ToolCommand {
             }
         };
 
-        let request = ToolRequest {
+        let request = ParsedToolRequest {
             tool: request.tool,
             params: request.params,
             stdin: stdin_data,
         };
 
-        // Output the request as JSON to stdout
-        // The orchestrator (AgentSandbox) will:
-        // 1. Detect the exit code 42
-        // 2. Parse stdout as a ToolRequest
-        // 3. Write to /tools/pending/<call_id>/request.json
-        let output = build_request_json(&request);
-        writeln!(context.stdout(), "{}", output)?;
-        context.stdout().flush()?;
+        // Call the host-provided invoke_tool function
+        #[cfg(target_family = "wasm")]
+        {
+            let wit_request = WitToolRequest {
+                tool: request.tool,
+                params: serde_json::to_string(&request.params).unwrap_or_default(),
+                stdin: request.stdin,
+            };
 
-        // Exit with TOOL_REQUEST_EXIT_CODE to signal yield to orchestrator
-        Ok(ExecutionResult::new(TOOL_REQUEST_EXIT_CODE))
+            let result = invoke_tool(&wit_request);
+
+            if result.success {
+                // Write tool output to stdout
+                write!(context.stdout(), "{}", result.output)?;
+                context.stdout().flush()?;
+                Ok(ExecutionResult::new(0))
+            } else {
+                // Write error to stderr
+                writeln!(context.stderr(), "tool: {}", result.output)?;
+                Ok(ExecutionResult::new(1))
+            }
+        }
+
+        // For native builds (tests), output JSON to stdout like before
+        #[cfg(not(target_family = "wasm"))]
+        {
+            let output = build_request_json(&request);
+            writeln!(context.stdout(), "{}", output)?;
+            context.stdout().flush()?;
+            Ok(ExecutionResult::new(0))
+        }
     }
 }
 
-/// Parse tool arguments into a ToolRequest.
-fn parse_tool_args(args: &[String]) -> Result<ToolRequest, String> {
+/// Parse tool arguments into a ParsedToolRequest.
+fn parse_tool_args(args: &[String]) -> Result<ParsedToolRequest, String> {
     let mut iter = args.iter().skip(1); // Skip "tool" itself
 
     // First argument must be the tool name
@@ -189,7 +211,7 @@ fn parse_tool_args(args: &[String]) -> Result<ToolRequest, String> {
         serde_json::Value::Object(params.into_iter().collect())
     };
 
-    Ok(ToolRequest {
+    Ok(ParsedToolRequest {
         tool,
         params: final_params,
         stdin: None, // Filled in later
@@ -208,7 +230,8 @@ fn parse_value_as_json(value: &str) -> serde_json::Value {
 }
 
 /// Build the JSON output for a tool request.
-fn build_request_json(request: &ToolRequest) -> String {
+#[cfg(not(target_family = "wasm"))]
+fn build_request_json(request: &ParsedToolRequest) -> String {
     let mut obj = serde_json::json!({
         "tool": request.tool,
         "params": request.params,
@@ -356,7 +379,7 @@ mod tests {
 
     #[test]
     fn test_build_request_json() {
-        let req = ToolRequest {
+        let req = ParsedToolRequest {
             tool: "test".to_string(),
             params: serde_json::json!({"key": "value"}),
             stdin: None,
@@ -368,7 +391,7 @@ mod tests {
 
     #[test]
     fn test_build_request_json_with_stdin() {
-        let req = ToolRequest {
+        let req = ParsedToolRequest {
             tool: "test".to_string(),
             params: serde_json::json!({}),
             stdin: Some(b"hello world".to_vec()),
