@@ -14,10 +14,11 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use eryx_vfs::{HybridVfsCtx, VfsStorage};
 #[cfg(feature = "embedded-shell")]
 use eryx_vfs::{HybridVfsState, HybridVfsView, add_hybrid_vfs_to_linker};
-use wasmtime::component::{Component, Linker, ResourceTable};
+use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{Config, Engine, Store};
 use wasmtime_wasi::p2::pipe::MemoryOutputPipe;
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
@@ -26,13 +27,70 @@ use crate::limits::ResourceLimits;
 use crate::runtime::{ExecutionResult, RuntimeError};
 
 // Generate host bindings for the shell component.
-// This creates the `Shell` struct for calling into the component.
+// This creates the `Shell` struct for calling into the component,
+// and the `ShellImports` trait with async invoke_tool method.
 wasmtime::component::bindgen!({
     path: "wit/shell.wit",
     world: "shell",
-    // Enable async for exported functions (we call them from the host)
+    // Enable async for both imports (tool invocation) and exports (execute)
+    imports: { default: async },
     exports: { default: async },
 });
+
+/// Handler for tool invocations from shell scripts.
+///
+/// Implement this trait to handle `tool <name> --params` commands from shell scripts.
+/// The handler is called asynchronously when the shell executes a tool command.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use conch::{ToolHandler, ToolRequest, ToolResult};
+///
+/// struct MyToolHandler;
+///
+/// #[async_trait::async_trait]
+/// impl ToolHandler for MyToolHandler {
+///     async fn invoke(&self, request: ToolRequest) -> ToolResult {
+///         match request.tool.as_str() {
+///             "echo" => ToolResult {
+///                 success: true,
+///                 output: request.params.clone(),
+///             },
+///             _ => ToolResult {
+///                 success: false,
+///                 output: format!("Unknown tool: {}", request.tool),
+///             },
+///         }
+///     }
+/// }
+/// ```
+#[async_trait]
+pub trait ToolHandler: Send + Sync {
+    /// Invoke a tool with the given request.
+    ///
+    /// Called when a shell script runs `tool <name> [--param value]...`.
+    async fn invoke(&self, request: ToolRequest) -> ToolResult;
+}
+
+/// Blanket implementation for async closures.
+///
+/// This allows using closures as tool handlers:
+/// ```rust,ignore
+/// shell.tool_handler(|req| async move {
+///     ToolResult { success: true, output: format!("got {}", req.tool) }
+/// });
+/// ```
+#[async_trait]
+impl<F, Fut> ToolHandler for F
+where
+    F: Fn(ToolRequest) -> Fut + Send + Sync,
+    Fut: std::future::Future<Output = ToolResult> + Send,
+{
+    async fn invoke(&self, request: ToolRequest) -> ToolResult {
+        self(request).await
+    }
+}
 
 /// Embedded WASM component bytes (when built with `embedded-shell` feature).
 #[cfg(feature = "embedded-shell")]
@@ -46,11 +104,32 @@ pub struct ComponentState {
     stdout_pipe: MemoryOutputPipe,
     stderr_pipe: MemoryOutputPipe,
     limiter: StoreLimiter,
+    tool_handler: Option<Arc<dyn ToolHandler>>,
+}
+
+/// Default tool handler that returns an error.
+fn default_tool_handler(request: &ToolRequest) -> ToolResult {
+    ToolResult {
+        success: false,
+        output: format!(
+            "No tool handler configured. Cannot execute tool: {}",
+            request.tool
+        ),
+    }
 }
 
 impl ComponentState {
     /// Create a new component state with fresh pipes for capturing output.
     fn new(output_capacity: usize, max_memory_bytes: u64) -> Self {
+        Self::with_tool_handler(output_capacity, max_memory_bytes, None)
+    }
+
+    /// Create a new component state with a custom tool handler.
+    fn with_tool_handler(
+        output_capacity: usize,
+        max_memory_bytes: u64,
+        tool_handler: Option<Arc<dyn ToolHandler>>,
+    ) -> Self {
         let stdout_pipe = MemoryOutputPipe::new(output_capacity);
         let stderr_pipe = MemoryOutputPipe::new(output_capacity);
 
@@ -65,6 +144,7 @@ impl ComponentState {
             stdout_pipe,
             stderr_pipe,
             limiter: StoreLimiter::new(max_memory_bytes),
+            tool_handler,
         }
     }
 
@@ -76,6 +156,15 @@ impl ComponentState {
     /// Get the captured stderr contents.
     fn stderr(&self) -> Vec<u8> {
         self.stderr_pipe.contents().to_vec()
+    }
+}
+
+impl ShellImports for ComponentState {
+    async fn invoke_tool(&mut self, request: ToolRequest) -> ToolResult {
+        match &self.tool_handler {
+            Some(handler) => handler.invoke(request).await,
+            None => default_tool_handler(&request),
+        }
     }
 }
 
@@ -100,12 +189,18 @@ pub struct HybridComponentState<S: VfsStorage + 'static> {
     stderr_pipe: MemoryOutputPipe,
     limiter: StoreLimiter,
     hybrid_vfs_ctx: HybridVfsCtx<S>,
+    tool_handler: Option<Arc<dyn ToolHandler>>,
 }
 
 #[cfg(feature = "embedded-shell")]
 impl<S: VfsStorage + 'static> HybridComponentState<S> {
-    /// Create a new hybrid component state.
-    fn new(output_capacity: usize, max_memory_bytes: u64, hybrid_vfs_ctx: HybridVfsCtx<S>) -> Self {
+    /// Create a new hybrid component state with an optional tool handler.
+    fn new(
+        output_capacity: usize,
+        max_memory_bytes: u64,
+        hybrid_vfs_ctx: HybridVfsCtx<S>,
+        tool_handler: Option<Arc<dyn ToolHandler>>,
+    ) -> Self {
         let stdout_pipe = MemoryOutputPipe::new(output_capacity);
         let stderr_pipe = MemoryOutputPipe::new(output_capacity);
 
@@ -121,6 +216,7 @@ impl<S: VfsStorage + 'static> HybridComponentState<S> {
             stderr_pipe,
             limiter: StoreLimiter::new(max_memory_bytes),
             hybrid_vfs_ctx,
+            tool_handler,
         }
     }
 
@@ -132,6 +228,16 @@ impl<S: VfsStorage + 'static> HybridComponentState<S> {
     /// Get the captured stderr contents.
     fn stderr(&self) -> Vec<u8> {
         self.stderr_pipe.contents().to_vec()
+    }
+}
+
+#[cfg(feature = "embedded-shell")]
+impl<S: VfsStorage + 'static> ShellImports for HybridComponentState<S> {
+    async fn invoke_tool(&mut self, request: ToolRequest) -> ToolResult {
+        match &self.tool_handler {
+            Some(handler) => handler.invoke(request).await,
+            None => default_tool_handler(&request),
+        }
     }
 }
 
@@ -224,9 +330,13 @@ impl ComponentShellExecutor {
 
     /// Create an executor from an existing engine and component.
     fn from_component(engine: Engine, component: Component) -> Result<Self, RuntimeError> {
-        // Create basic linker with WASI only
+        // Create linker with WASI and shell imports
         let mut linker = Linker::new(&engine);
         wasmtime_wasi::p2::add_to_linker_async(&mut linker)
+            .map_err(|e| RuntimeError::Wasm(e.to_string()))?;
+
+        // Add shell imports (invoke-tool) using generated linker function
+        Shell::add_to_linker_imports::<_, HasSelf<ComponentState>>(&mut linker, |state| state)
             .map_err(|e| RuntimeError::Wasm(e.to_string()))?;
 
         // Pre-instantiate for basic execution
@@ -347,6 +457,7 @@ impl ComponentShellExecutor {
     ///     "cat /project/README.md",
     ///     &limits,
     ///     hybrid_ctx,
+    ///     None, // No tool handler
     /// ).await?;
     /// ```
     #[cfg(feature = "embedded-shell")]
@@ -355,12 +466,14 @@ impl ComponentShellExecutor {
         script: &str,
         limits: &ResourceLimits,
         hybrid_ctx: HybridVfsCtx<S>,
+        tool_handler: Option<Arc<dyn ToolHandler>>,
     ) -> Result<ExecutionResult, RuntimeError> {
-        // Create state with hybrid VFS context
+        // Create state with hybrid VFS context and optional tool handler
         let state = HybridComponentState::new(
             limits.max_output_bytes as usize,
             limits.max_memory_bytes,
             hybrid_ctx,
+            tool_handler,
         );
 
         let mut store = Store::new(&self.engine, state);
@@ -390,6 +503,11 @@ impl ComponentShellExecutor {
         add_hybrid_vfs_to_linker(&mut linker).map_err(|e| {
             RuntimeError::Wasm(format!("failed to add hybrid VFS to linker: {}", e))
         })?;
+        // Add shell imports (invoke-tool) using generated linker function
+        Shell::add_to_linker_imports::<_, HasSelf<HybridComponentState<S>>>(&mut linker, |state| {
+            state
+        })
+        .map_err(|e| RuntimeError::Wasm(e.to_string()))?;
         linker.allow_shadowing(false);
 
         // Load the component
@@ -452,6 +570,7 @@ impl ComponentShellExecutor {
         _script: &str,
         _limits: &ResourceLimits,
         _hybrid_ctx: HybridVfsCtx<S>,
+        _tool_handler: Option<Arc<dyn ToolHandler>>,
     ) -> Result<ExecutionResult, RuntimeError> {
         Err(RuntimeError::Wasm(
             "execute_with_hybrid_vfs requires embedded-shell feature".to_string(),

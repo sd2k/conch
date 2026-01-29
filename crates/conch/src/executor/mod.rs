@@ -8,4 +8,4 @@
 
 mod component;
 
-pub use component::ComponentShellExecutor;
+pub use component::{ComponentShellExecutor, ToolHandler, ToolRequest, ToolResult};

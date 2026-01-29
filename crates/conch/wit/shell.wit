@@ -9,6 +9,33 @@ package conch:shell@0.1.0;
 /// Note: stdout/stderr are captured by the host via WASI pipes, not returned
 /// in the execute result. The shell writes directly to WASI stdout/stderr.
 world shell {
+    /// Tool invocation request from the shell.
+    ///
+    /// When a script runs `tool <name> --param value`, the shell calls the
+    /// host-provided invoke-tool function with this request.
+    record tool-request {
+        /// The tool name (e.g., "web_search", "code_edit")
+        tool: string,
+        /// JSON-encoded parameters
+        params: string,
+        /// Optional stdin data piped to the tool
+        stdin: option<list<u8>>,
+    }
+
+    /// Tool invocation result from the host.
+    record tool-result {
+        /// Whether the tool succeeded
+        success: bool,
+        /// Output from the tool (stdout on success, error message on failure)
+        output: string,
+    }
+
+    /// Import: Host provides tool execution capability.
+    ///
+    /// When the shell's `tool` builtin is invoked, it calls this function
+    /// to request tool execution from the host/orchestrator.
+    import invoke-tool: func(request: tool-request) -> tool-result;
+
     /// Execute a shell script in the sandbox.
     ///
     /// The script is interpreted as bash-compatible shell code.

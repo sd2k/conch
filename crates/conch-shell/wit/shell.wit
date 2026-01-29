@@ -34,9 +34,6 @@ world shell {
     ///
     /// When the shell's `tool` builtin is invoked, it calls this function
     /// to request tool execution from the host/orchestrator.
-    ///
-    /// This can be made async with jco's --async-imports flag, allowing
-    /// the host to perform async operations (network requests, etc).
     import invoke-tool: func(request: tool-request) -> tool-result;
 
     /// Execute a shell script in the sandbox.

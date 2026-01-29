@@ -1,23 +1,133 @@
 //! Tool Execution Cycle Example
 //!
-//! Demonstrates the complete tool invocation lifecycle:
+//! Demonstrates the callback-based tool invocation pattern:
 //! 1. Agent script invokes a tool via the `tool` builtin
-//! 2. Sandbox yields with ExecutionOutcome::ToolRequest
-//! 3. Orchestrator executes the tool externally
-//! 4. Orchestrator writes result back via write_tool_result()
-//! 5. Agent script can read the result
+//! 2. The configured tool_handler callback is invoked immediately
+//! 3. The handler executes the tool logic and returns a result
+//! 4. The script receives the result and continues execution
 //!
 //! This pattern enables agents to use external tools (APIs, databases, etc.)
-//! while maintaining sandbox isolation.
+//! while maintaining sandbox isolation. The tool execution happens synchronously
+//! from the script's perspective, but the handler can be async.
 //!
 //! Run with: cargo run -p conch --example tool_execution --features embedded-shell
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use conch::ResourceLimits;
-use conch::agent::{AgentSandbox, ExecutionOutcome, ToolDefinition, ToolResult};
+use conch::agent::{AgentSandbox, ToolDefinition};
+use conch::{ToolRequest, ToolResult};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Tool Execution Cycle Example ===\n");
+
+    // Track how many tool calls we've handled
+    let call_count = Arc::new(AtomicUsize::new(0));
+    let call_count_clone = call_count.clone();
+
+    // Create a tool handler that implements the actual tool logic
+    // Note: request.params is a JSON string that needs to be parsed
+    let tool_handler = move |request: ToolRequest| {
+        let count = call_count_clone.clone();
+        async move {
+            let call_num = count.fetch_add(1, Ordering::SeqCst) + 1;
+            println!(
+                "  [Handler] Call #{}: {} with params {}",
+                call_num, request.tool, request.params
+            );
+
+            // Parse params JSON string
+            let params: serde_json::Value =
+                serde_json::from_str(&request.params).unwrap_or_default();
+
+            match request.tool.as_str() {
+                "calculator" => {
+                    let op = params["operation"].as_str().unwrap_or("add");
+                    let a = params["a"].as_f64().unwrap_or(0.0);
+                    let b = params["b"].as_f64().unwrap_or(0.0);
+
+                    let result = match op {
+                        "add" => a + b,
+                        "subtract" => a - b,
+                        "multiply" => a * b,
+                        "divide" if b != 0.0 => a / b,
+                        "divide" => {
+                            return ToolResult {
+                                success: false,
+                                output: "Division by zero".to_string(),
+                            };
+                        }
+                        _ => {
+                            return ToolResult {
+                                success: false,
+                                output: format!("Unknown operation: {}", op),
+                            };
+                        }
+                    };
+
+                    println!("  [Handler] Calculated: {} {} {} = {}", a, op, b, result);
+                    ToolResult {
+                        success: true,
+                        output: serde_json::to_string(&serde_json::json!({ "result": result }))
+                            .unwrap(),
+                    }
+                }
+                "web_fetch" => {
+                    let url = params["url"].as_str().unwrap_or("unknown");
+                    println!("  [Handler] Simulating fetch from: {}", url);
+
+                    // Simulate different responses based on URL
+                    if url.contains("api.example.com/data") {
+                        ToolResult {
+                            success: false,
+                            output: "Connection refused: unable to reach api.example.com"
+                                .to_string(),
+                        }
+                    } else if url.contains("api.example.com/numbers") {
+                        ToolResult {
+                            success: true,
+                            output: serde_json::to_string(&serde_json::json!({
+                                "numbers": [10, 20, 30, 40, 50]
+                            }))
+                            .unwrap(),
+                        }
+                    } else {
+                        ToolResult {
+                            success: true,
+                            output: serde_json::to_string(&serde_json::json!({
+                                "status": 200,
+                                "body": "OK"
+                            }))
+                            .unwrap(),
+                        }
+                    }
+                }
+                "database_query" => {
+                    let query = params["query"].as_str().unwrap_or("");
+                    println!("  [Handler] Executing query: {}", query);
+
+                    ToolResult {
+                        success: true,
+                        output: serde_json::to_string(&serde_json::json!({
+                            "rows": [
+                                {"id": 1, "name": "Alice", "role": "admin"},
+                                {"id": 2, "name": "Bob", "role": "admin"}
+                            ],
+                            "count": 2,
+                            "query_time_ms": 12
+                        }))
+                        .unwrap(),
+                    }
+                }
+                _ => ToolResult {
+                    success: false,
+                    output: format!("Unknown tool: {}", request.tool),
+                },
+            }
+        }
+    };
 
     // Create a sandbox with several tools
     let sandbox = AgentSandbox::builder("worker-001")
@@ -61,6 +171,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "required": ["query"]
             }),
         ))
+        .tool_handler(tool_handler)
         .build()
         .await?;
 
@@ -71,252 +182,90 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // =========================================================================
     println!("--- Example 1: Calculator Tool ---\n");
 
-    let outcome = sandbox
-        .execute_with_tools("tool calculator --operation multiply --a 7 --b 6", &limits)
+    let result = sandbox
+        .execute("tool calculator --operation multiply --a 7 --b 6", &limits)
         .await?;
 
-    match outcome {
-        ExecutionOutcome::ToolRequest(request) => {
-            println!("Tool requested: {}", request.tool);
-            println!("Call ID: {}", request.call_id);
-            println!(
-                "Parameters: {}",
-                serde_json::to_string_pretty(&request.params)?
-            );
-
-            // Simulate executing the calculator
-            let result = match request.params["operation"].as_str() {
-                Some("multiply") => {
-                    let a = request.params["a"].as_f64().unwrap_or(0.0);
-                    let b = request.params["b"].as_f64().unwrap_or(0.0);
-                    serde_json::json!({ "result": a * b })
-                }
-                _ => serde_json::json!({ "error": "Unknown operation" }),
-            };
-
-            println!("\nExecuting calculation...");
-            println!("Result: {}", result);
-
-            // Write result back to sandbox
-            sandbox
-                .write_tool_result(&request.call_id, ToolResult::success(result))
-                .await?;
-
-            // Agent can now access the result
-            let read_result = sandbox
-                .execute("cat /tools/last_result.json | jq .result", &limits)
-                .await?;
-            println!(
-                "Agent reads result: {}",
-                String::from_utf8_lossy(&read_result.stdout).trim()
-            );
-        }
-        ExecutionOutcome::Completed(r) => {
-            println!("Unexpected completion: exit code {}", r.exit_code);
-        }
-    }
+    println!("Exit code: {}", result.exit_code);
+    println!("Output: {}", String::from_utf8_lossy(&result.stdout));
 
     // =========================================================================
     // Example 2: Tool with JSON Parameters
     // =========================================================================
     println!("\n--- Example 2: Complex JSON Parameters ---\n");
 
-    let outcome = sandbox
-        .execute_with_tools(
+    let result = sandbox
+        .execute(
             r#"tool database_query --json '{"query": "SELECT * FROM users WHERE role = ?", "params": ["admin"]}'"#,
             &limits,
         )
         .await?;
 
-    match outcome {
-        ExecutionOutcome::ToolRequest(request) => {
-            println!("Database query requested:");
-            println!("  Query: {}", request.params["query"]);
-            println!("  Params: {}", request.params["params"]);
-
-            // Simulate database query result
-            let db_result = serde_json::json!({
-                "rows": [
-                    {"id": 1, "name": "Alice", "role": "admin"},
-                    {"id": 2, "name": "Bob", "role": "admin"}
-                ],
-                "count": 2,
-                "query_time_ms": 12
-            });
-
-            sandbox
-                .write_tool_result(&request.call_id, ToolResult::success(db_result))
-                .await?;
-
-            // Agent processes the result
-            let result = sandbox
-                .execute("cat /tools/last_result.json | jq '.rows[].name'", &limits)
-                .await?;
-            println!("Users found:\n{}", String::from_utf8_lossy(&result.stdout));
-        }
-        _ => {}
-    }
+    println!("Exit code: {}", result.exit_code);
+    println!("Output: {}", String::from_utf8_lossy(&result.stdout));
 
     // =========================================================================
     // Example 3: Error Handling
     // =========================================================================
     println!("\n--- Example 3: Error Handling ---\n");
 
-    let outcome = sandbox
-        .execute_with_tools("tool web_fetch --url https://api.example.com/data", &limits)
+    let result = sandbox
+        .execute("tool web_fetch --url https://api.example.com/data", &limits)
         .await?;
 
-    match outcome {
-        ExecutionOutcome::ToolRequest(request) => {
-            println!("Fetch requested: {}", request.params["url"]);
-
-            // Simulate a network error
-            sandbox
-                .write_tool_result(
-                    &request.call_id,
-                    ToolResult::error("Connection refused: unable to reach api.example.com"),
-                )
-                .await?;
-
-            // Agent sees the error
-            let result = sandbox
-                .execute("cat /tools/last_result.json", &limits)
-                .await?;
-            println!(
-                "Error response:\n{}",
-                String::from_utf8_lossy(&result.stdout)
-            );
-
-            // Check tool history metadata shows failure
-            let result = sandbox
-                .execute(
-                    &format!(
-                        "cat /tools/history/{}/metadata.json | jq .success",
-                        request.call_id
-                    ),
-                    &limits,
-                )
-                .await?;
-            println!(
-                "Success status: {}",
-                String::from_utf8_lossy(&result.stdout).trim()
-            );
-        }
-        _ => {}
-    }
+    // Tool errors are returned in the output, exit code indicates tool success
+    println!("Exit code: {}", result.exit_code);
+    println!("Output: {}", String::from_utf8_lossy(&result.stdout));
 
     // =========================================================================
-    // Example 4: Multi-Step Workflow
+    // Example 4: Multi-Step Script with Tools
     // =========================================================================
-    println!("\n--- Example 4: Multi-Step Workflow ---\n");
+    println!("\n--- Example 4: Multi-Step Script ---\n");
 
-    // Step 1: Fetch data
-    println!("Step 1: Fetching data...");
-    let outcome = sandbox
-        .execute_with_tools(
-            "tool web_fetch --url https://api.example.com/numbers",
-            &limits,
-        )
-        .await?;
-
-    if let ExecutionOutcome::ToolRequest(request) = outcome {
-        sandbox
-            .write_tool_result(
-                &request.call_id,
-                ToolResult::success(serde_json::json!({
-                    "numbers": [10, 20, 30, 40, 50]
-                })),
-            )
-            .await?;
-        println!("  Data fetched: [10, 20, 30, 40, 50]");
-    }
-
-    // Step 2: Process with calculator
-    println!("Step 2: Calculating sum...");
-
-    // Store intermediate result
-    sandbox
-        .execute(
-            "cat /tools/last_result.json | jq '.numbers | add' > /agent/scratch/sum.txt",
-            &limits,
-        )
-        .await?;
-
-    // Use calculator to multiply
-    let outcome = sandbox
-        .execute_with_tools(
-            "tool calculator --operation multiply --a 150 --b 2",
-            &limits,
-        )
-        .await?;
-
-    if let ExecutionOutcome::ToolRequest(request) = outcome {
-        sandbox
-            .write_tool_result(
-                &request.call_id,
-                ToolResult::success(serde_json::json!({ "result": 300 })),
-            )
-            .await?;
-        println!("  Sum doubled: 300");
-    }
-
-    // Step 3: Store final result
-    println!("Step 3: Storing result...");
+    // With callback-based tools, we can use tools inline in a script
     let result = sandbox
         .execute(
             r#"
-            cat /tools/last_result.json > /agent/state/final_result.json
-            echo "Workflow complete. Final result:"
-            cat /agent/state/final_result.json
+            echo "Step 1: Fetching data..."
+            tool web_fetch --url https://api.example.com/numbers
+
+            echo ""
+            echo "Step 2: Calculating sum doubled..."
+            tool calculator --operation multiply --a 150 --b 2
+
+            echo ""
+            echo "Done!"
         "#,
             &limits,
         )
         .await?;
+
+    println!("Multi-step script output:");
     println!("{}", String::from_utf8_lossy(&result.stdout));
 
     // =========================================================================
-    // Example 5: Checking Tool History
+    // Example 5: Normal Commands Still Work
     // =========================================================================
-    println!("\n--- Example 5: Tool History ---\n");
+    println!("\n--- Example 5: Normal Commands ---\n");
 
-    // Read metadata for each known call (ls not available in embedded shell)
-    println!("Tool execution summary:");
-    for call_id in ["call-001", "call-002", "call-003", "call-004", "call-005"] {
-        let path = format!("/tools/history/{}/metadata.json", call_id);
-        if let Ok(result) = sandbox.execute(&format!("cat {}", path), &limits).await {
-            if result.exit_code == 0 {
-                let metadata: serde_json::Value =
-                    serde_json::from_slice(&result.stdout).unwrap_or_default();
-                let success = metadata["success"].as_bool().unwrap_or(false);
-                println!("  {}: success={}", call_id, success);
-            }
-        }
-    }
-
-    // =========================================================================
-    // Example 6: Normal Commands Complete Normally
-    // =========================================================================
-    println!("\n--- Example 6: Normal Commands ---\n");
-
-    let outcome = sandbox
-        .execute_with_tools(
+    let result = sandbox
+        .execute(
             "echo 'This is a normal command' && cat /agent/metadata.json",
             &limits,
         )
         .await?;
 
-    match outcome {
-        ExecutionOutcome::Completed(result) => {
-            println!(
-                "Normal command completed with exit code {}",
-                result.exit_code
-            );
-            println!("Output: {}", String::from_utf8_lossy(&result.stdout));
-        }
-        ExecutionOutcome::ToolRequest(_) => {
-            println!("Unexpected tool request!");
-        }
-    }
+    println!("Exit code: {}", result.exit_code);
+    println!("Output: {}", String::from_utf8_lossy(&result.stdout));
+
+    // =========================================================================
+    // Summary
+    // =========================================================================
+    println!("\n--- Summary ---");
+    println!(
+        "Total tool calls handled: {}",
+        call_count.load(Ordering::SeqCst)
+    );
 
     println!("\n=== Example Complete ===");
 
