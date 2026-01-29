@@ -4,19 +4,20 @@
 //! simulating a real agent loop where tool calls are handled by external
 //! systems (APIs, databases, file systems, etc.).
 //!
-//! This example shows the complete flow:
+//! This example shows the callback-based flow:
 //! 1. Agent script requests a tool via `tool` builtin
-//! 2. Sandbox yields with ExecutionOutcome::ToolRequest
-//! 3. Orchestrator dispatches to actual external implementation
-//! 4. Result is written back to sandbox
-//! 5. Agent can read and process the result
+//! 2. Tool handler callback is invoked with the request
+//! 3. Handler dispatches to actual external implementation
+//! 4. Result is returned to the script immediately
 //!
 //! Run with: cargo run -p conch --example external_tools --features embedded-shell
 
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use conch::ResourceLimits;
-use conch::agent::{AgentSandbox, ExecutionOutcome, ToolDefinition, ToolResult};
+use conch::agent::{AgentSandbox, ToolDefinition};
+use conch::{ToolRequest, ToolResult};
 
 /// Simulated external tool implementations.
 /// In a real system, these would call actual APIs, databases, etc.
@@ -71,23 +72,38 @@ tokio = "1.0"
             "kv_get" => self.kv_get(params),
             "kv_set" => self.kv_set(params),
             "http_get" => self.http_get(params),
-            _ => ToolResult::error(format!("Unknown tool: {}", tool)),
+            _ => ToolResult {
+                success: false,
+                output: format!("Unknown tool: {}", tool),
+            },
         }
     }
 
     fn file_read(&self, params: &serde_json::Value) -> ToolResult {
         let path = match params.get("path").and_then(|v| v.as_str()) {
             Some(p) => p,
-            None => return ToolResult::error("Missing required parameter: path"),
+            None => {
+                return ToolResult {
+                    success: false,
+                    output: "Missing required parameter: path".to_string(),
+                };
+            }
         };
 
         match self.files.get(path) {
-            Some(content) => ToolResult::success(serde_json::json!({
-                "path": path,
-                "content": content,
-                "size": content.len()
-            })),
-            None => ToolResult::error(format!("File not found: {}", path)),
+            Some(content) => ToolResult {
+                success: true,
+                output: serde_json::to_string(&serde_json::json!({
+                    "path": path,
+                    "content": content,
+                    "size": content.len()
+                }))
+                .unwrap(),
+            },
+            None => ToolResult {
+                success: false,
+                output: format!("File not found: {}", path),
+            },
         }
     }
 
@@ -101,135 +117,156 @@ tokio = "1.0"
             .map(|s| s.as_str())
             .collect();
 
-        ToolResult::success(serde_json::json!({
-            "files": files,
-            "count": files.len()
-        }))
+        ToolResult {
+            success: true,
+            output: serde_json::to_string(&serde_json::json!({
+                "files": files,
+                "count": files.len()
+            }))
+            .unwrap(),
+        }
     }
 
     fn file_write(&mut self, params: &serde_json::Value) -> ToolResult {
         let path = match params.get("path").and_then(|v| v.as_str()) {
             Some(p) => p,
-            None => return ToolResult::error("Missing required parameter: path"),
+            None => {
+                return ToolResult {
+                    success: false,
+                    output: "Missing required parameter: path".to_string(),
+                };
+            }
         };
         let content = match params.get("content").and_then(|v| v.as_str()) {
             Some(c) => c,
-            None => return ToolResult::error("Missing required parameter: content"),
+            None => {
+                return ToolResult {
+                    success: false,
+                    output: "Missing required parameter: content".to_string(),
+                };
+            }
         };
 
         self.files.insert(path.to_string(), content.to_string());
 
-        ToolResult::success(serde_json::json!({
-            "path": path,
-            "written": content.len(),
-            "success": true
-        }))
+        ToolResult {
+            success: true,
+            output: serde_json::to_string(&serde_json::json!({
+                "path": path,
+                "written": content.len(),
+                "success": true
+            }))
+            .unwrap(),
+        }
     }
 
     fn kv_get(&self, params: &serde_json::Value) -> ToolResult {
         let key = match params.get("key").and_then(|v| v.as_str()) {
             Some(k) => k,
-            None => return ToolResult::error("Missing required parameter: key"),
+            None => {
+                return ToolResult {
+                    success: false,
+                    output: "Missing required parameter: key".to_string(),
+                };
+            }
         };
 
         match self.kv_store.get(key) {
-            Some(value) => ToolResult::success(serde_json::json!({
-                "key": key,
-                "value": value,
-                "found": true
-            })),
-            None => ToolResult::success(serde_json::json!({
-                "key": key,
-                "value": null,
-                "found": false
-            })),
+            Some(value) => ToolResult {
+                success: true,
+                output: serde_json::to_string(&serde_json::json!({
+                    "key": key,
+                    "value": value,
+                    "found": true
+                }))
+                .unwrap(),
+            },
+            None => ToolResult {
+                success: true,
+                output: serde_json::to_string(&serde_json::json!({
+                    "key": key,
+                    "value": null,
+                    "found": false
+                }))
+                .unwrap(),
+            },
         }
     }
 
     fn kv_set(&mut self, params: &serde_json::Value) -> ToolResult {
         let key = match params.get("key").and_then(|v| v.as_str()) {
             Some(k) => k,
-            None => return ToolResult::error("Missing required parameter: key"),
+            None => {
+                return ToolResult {
+                    success: false,
+                    output: "Missing required parameter: key".to_string(),
+                };
+            }
         };
         let value = match params.get("value").and_then(|v| v.as_str()) {
             Some(v) => v,
-            None => return ToolResult::error("Missing required parameter: value"),
+            None => {
+                return ToolResult {
+                    success: false,
+                    output: "Missing required parameter: value".to_string(),
+                };
+            }
         };
 
         self.kv_store.insert(key.to_string(), value.to_string());
 
-        ToolResult::success(serde_json::json!({
-            "key": key,
-            "stored": true
-        }))
+        ToolResult {
+            success: true,
+            output: serde_json::to_string(&serde_json::json!({
+                "key": key,
+                "stored": true
+            }))
+            .unwrap(),
+        }
     }
 
     fn http_get(&self, params: &serde_json::Value) -> ToolResult {
         let url = match params.get("url").and_then(|v| v.as_str()) {
             Some(u) => u,
-            None => return ToolResult::error("Missing required parameter: url"),
+            None => {
+                return ToolResult {
+                    success: false,
+                    output: "Missing required parameter: url".to_string(),
+                };
+            }
         };
 
         // Simulate HTTP responses based on URL
         if url.contains("api.github.com") {
-            ToolResult::success(serde_json::json!({
-                "status": 200,
-                "body": {
-                    "name": "example-repo",
-                    "stars": 42,
-                    "language": "Rust"
-                }
-            }))
+            ToolResult {
+                success: true,
+                output: serde_json::to_string(&serde_json::json!({
+                    "status": 200,
+                    "body": {
+                        "name": "example-repo",
+                        "stars": 42,
+                        "language": "Rust"
+                    }
+                }))
+                .unwrap(),
+            }
         } else if url.contains("httpbin.org") {
-            ToolResult::success(serde_json::json!({
-                "status": 200,
-                "body": {
-                    "origin": "127.0.0.1",
-                    "url": url
-                }
-            }))
+            ToolResult {
+                success: true,
+                output: serde_json::to_string(&serde_json::json!({
+                    "status": 200,
+                    "body": {
+                        "origin": "127.0.0.1",
+                        "url": url
+                    }
+                }))
+                .unwrap(),
+            }
         } else {
-            ToolResult::error(format!("Connection refused: {}", url))
-        }
-    }
-}
-
-/// Run a script in the sandbox, handling any tool requests via external executor.
-async fn run_with_external_tools(
-    sandbox: &AgentSandbox,
-    executor: &mut ExternalToolExecutor,
-    script: &str,
-    limits: &ResourceLimits,
-) -> Result<conch::ExecutionResult, conch::RuntimeError> {
-    let outcome = sandbox.execute_with_tools(script, limits).await?;
-
-    match outcome {
-        ExecutionOutcome::Completed(result) => Ok(result),
-        ExecutionOutcome::ToolRequest(request) => {
-            println!("  [Orchestrator] Tool request: {}", request.tool);
-            println!("  [Orchestrator] Params: {}", request.params);
-
-            // Execute tool externally
-            let result = executor.execute(&request.tool, &request.params);
-
-            let success = result.is_success();
-            println!("  [Orchestrator] Result success: {}", success);
-
-            // Write result back to sandbox
-            sandbox.write_tool_result(&request.call_id, result).await?;
-
-            // Return a synthetic result indicating tool was executed
-            Ok(conch::ExecutionResult {
-                exit_code: 0,
-                stdout: format!(
-                    "Tool {} executed (call_id: {})",
-                    request.tool, request.call_id
-                )
-                .into_bytes(),
-                stderr: Vec::new(),
-                truncated: false,
-                stats: Default::default(),
-            })
+            ToolResult {
+                success: false,
+                output: format!("Connection refused: {}", url),
+            }
         }
     }
 }
@@ -239,7 +276,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== External Tool Execution Example ===\n");
 
     // Create external tool executor (simulates real external systems)
-    let mut executor = ExternalToolExecutor::new();
+    // Wrap in Arc<Mutex> so it can be shared with the async tool handler
+    let executor = Arc::new(Mutex::new(ExternalToolExecutor::new()));
+    let executor_clone = executor.clone();
+
+    // Create the tool handler that dispatches to the external executor
+    // Note: request.params is a JSON string that needs to be parsed
+    let tool_handler = move |request: ToolRequest| {
+        let exec = executor_clone.clone();
+        async move {
+            println!("  [Orchestrator] Tool request: {}", request.tool);
+            println!("  [Orchestrator] Params: {}", request.params);
+
+            // Parse params JSON string
+            let params: serde_json::Value =
+                serde_json::from_str(&request.params).unwrap_or_default();
+
+            let result = exec.lock().unwrap().execute(&request.tool, &params);
+
+            println!("  [Orchestrator] Result success: {}", result.success);
+            result
+        }
+    };
 
     // Create sandbox with tool definitions
     let sandbox = AgentSandbox::builder("file-agent")
@@ -311,6 +369,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "required": ["url"]
             }),
         ))
+        .tool_handler(tool_handler)
         .build()
         .await?;
 
@@ -321,18 +380,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // =========================================================================
     println!("--- Scenario 1: Reading External File ---\n");
 
-    run_with_external_tools(
-        &sandbox,
-        &mut executor,
-        "tool file_read --path README.md",
-        &limits,
-    )
-    .await?;
-
-    // Agent reads the result
     let result = sandbox
-        .execute("cat /tools/last_result.json", &limits)
+        .execute("tool file_read --path README.md", &limits)
         .await?;
+
     println!("Agent sees file content:");
     println!("{}\n", String::from_utf8_lossy(&result.stdout));
 
@@ -341,179 +392,123 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // =========================================================================
     println!("--- Scenario 2: List and Read Files ---\n");
 
-    // List all files
-    run_with_external_tools(&sandbox, &mut executor, "tool file_list", &limits).await?;
+    let result = sandbox.execute("tool file_list", &limits).await?;
 
-    let result = sandbox
-        .execute("cat /tools/last_result.json", &limits)
-        .await?;
     println!("Available files:");
     println!("{}\n", String::from_utf8_lossy(&result.stdout));
 
     // Read source file
-    run_with_external_tools(
-        &sandbox,
-        &mut executor,
-        "tool file_read --path src/main.rs",
-        &limits,
-    )
-    .await?;
-
     let result = sandbox
-        .execute("cat /tools/last_result.json | jq -r .content", &limits)
+        .execute("tool file_read --path src/main.rs", &limits)
         .await?;
+
     println!("Source code:");
     println!("{}", String::from_utf8_lossy(&result.stdout));
 
     // =========================================================================
     // Scenario 3: Write to external filesystem
     // =========================================================================
-    println!("--- Scenario 3: Writing to External Filesystem ---\n");
-
-    run_with_external_tools(
-        &sandbox,
-        &mut executor,
-        r#"tool file_write --json '{"path": "output.txt", "content": "Generated by agent"}'"#,
-        &limits,
-    )
-    .await?;
+    println!("\n--- Scenario 3: Writing to External Filesystem ---\n");
 
     let result = sandbox
-        .execute("cat /tools/last_result.json", &limits)
+        .execute(
+            r#"tool file_write --json '{"path": "output.txt", "content": "Generated by agent"}'"#,
+            &limits,
+        )
         .await?;
+
     println!("Write result:");
     println!("{}\n", String::from_utf8_lossy(&result.stdout));
 
     // Verify by reading it back
-    run_with_external_tools(
-        &sandbox,
-        &mut executor,
-        "tool file_read --path output.txt",
-        &limits,
-    )
-    .await?;
-
     let result = sandbox
-        .execute("cat /tools/last_result.json | jq -r .content", &limits)
+        .execute("tool file_read --path output.txt", &limits)
         .await?;
+
     println!("Read back: {}", String::from_utf8_lossy(&result.stdout));
 
     // =========================================================================
     // Scenario 4: Key-Value Store Operations
     // =========================================================================
-    println!("--- Scenario 4: Key-Value Store ---\n");
+    println!("\n--- Scenario 4: Key-Value Store ---\n");
 
     // Store a value
-    run_with_external_tools(
-        &sandbox,
-        &mut executor,
-        r#"tool kv_set --key "session_id" --value "abc123""#,
-        &limits,
-    )
-    .await?;
-    println!("Stored session_id");
-
-    // Retrieve it
-    run_with_external_tools(
-        &sandbox,
-        &mut executor,
-        r#"tool kv_get --key "session_id""#,
-        &limits,
-    )
-    .await?;
-
     let result = sandbox
-        .execute("cat /tools/last_result.json", &limits)
-        .await?;
-    println!("Retrieved:");
-    println!("{}\n", String::from_utf8_lossy(&result.stdout));
-
-    // Try non-existent key
-    run_with_external_tools(
-        &sandbox,
-        &mut executor,
-        r#"tool kv_get --key "nonexistent""#,
-        &limits,
-    )
-    .await?;
-
-    let result = sandbox
-        .execute("cat /tools/last_result.json | jq .found", &limits)
+        .execute(
+            r#"tool kv_set --key "session_id" --value "abc123""#,
+            &limits,
+        )
         .await?;
     println!(
-        "Nonexistent key found: {}",
+        "Stored session_id: {}",
+        String::from_utf8_lossy(&result.stdout)
+    );
+
+    // Retrieve it
+    let result = sandbox
+        .execute(r#"tool kv_get --key "session_id""#, &limits)
+        .await?;
+
+    println!("Retrieved: {}\n", String::from_utf8_lossy(&result.stdout));
+
+    // Try non-existent key
+    let result = sandbox
+        .execute(r#"tool kv_get --key "nonexistent""#, &limits)
+        .await?;
+
+    println!(
+        "Nonexistent key: {}",
         String::from_utf8_lossy(&result.stdout)
     );
 
     // =========================================================================
     // Scenario 5: HTTP Request (simulated)
     // =========================================================================
-    println!("--- Scenario 5: HTTP Request ---\n");
-
-    run_with_external_tools(
-        &sandbox,
-        &mut executor,
-        r#"tool http_get --url "https://api.github.com/repos/example/repo""#,
-        &limits,
-    )
-    .await?;
+    println!("\n--- Scenario 5: HTTP Request ---\n");
 
     let result = sandbox
-        .execute("cat /tools/last_result.json", &limits)
+        .execute(
+            r#"tool http_get --url "https://api.github.com/repos/example/repo""#,
+            &limits,
+        )
         .await?;
+
     println!("GitHub API response:");
     println!("{}\n", String::from_utf8_lossy(&result.stdout));
 
     // Failed request
-    run_with_external_tools(
-        &sandbox,
-        &mut executor,
-        r#"tool http_get --url "https://invalid.example.com/api""#,
-        &limits,
-    )
-    .await?;
-
     let result = sandbox
-        .execute("cat /tools/last_result.json", &limits)
+        .execute(
+            r#"tool http_get --url "https://invalid.example.com/api""#,
+            &limits,
+        )
         .await?;
+
     println!("Failed request:");
     println!("{}\n", String::from_utf8_lossy(&result.stdout));
 
     // =========================================================================
-    // Scenario 6: Agent stores external data in sandbox scratch
+    // Scenario 6: Multi-tool script
     // =========================================================================
-    println!("--- Scenario 6: Combining External and Sandbox Storage ---\n");
+    println!("--- Scenario 6: Multi-Tool Script ---\n");
 
-    // Read external file
-    run_with_external_tools(
-        &sandbox,
-        &mut executor,
-        "tool file_read --path Cargo.toml",
-        &limits,
-    )
-    .await?;
-
-    // Agent processes and stores in sandbox scratch
+    // Read external file, write to sandbox scratch
     let result = sandbox
         .execute(
             r#"
-            cat /tools/last_result.json | jq -r .content > /agent/scratch/cargo_backup.toml
-            echo "Backed up Cargo.toml to sandbox scratch"
-            wc -l /agent/scratch/cargo_backup.toml
+            echo "Reading Cargo.toml from external filesystem..."
+            tool file_read --path Cargo.toml
+
+            echo ""
+            echo "Done!"
         "#,
             &limits,
         )
         .await?;
+
     println!("{}", String::from_utf8_lossy(&result.stdout));
 
-    // Verify backup
-    let result = sandbox
-        .execute("cat /agent/scratch/cargo_backup.toml", &limits)
-        .await?;
-    println!("Backup contents:");
-    println!("{}", String::from_utf8_lossy(&result.stdout));
-
-    println!("=== Example Complete ===");
+    println!("\n=== Example Complete ===");
 
     Ok(())
 }

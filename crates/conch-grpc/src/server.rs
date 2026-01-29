@@ -1,15 +1,16 @@
 //! gRPC server implementation for the Sandbox service.
 
 use std::pin::Pin;
-
 use std::time::Duration;
 
-use tokio::sync::mpsc;
+use async_trait::async_trait;
+use tokio::sync::{mpsc, oneshot};
 use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
 use tonic::{Request, Response, Status, Streaming};
 
 use conch::ResourceLimits;
-use conch::agent::{AgentSandbox, ExecutionOutcome, ToolDefinition, ToolResult};
+use conch::agent::{AgentSandbox, ToolDefinition};
+use conch::{ToolHandler, ToolRequest, ToolResult};
 
 use crate::proto::{
     self, ClientMessage, ExecuteRequest, ServerMessage, client_message::Msg as ClientMsg,
@@ -83,6 +84,36 @@ impl proto::sandbox_server::Sandbox for SandboxService {
     }
 }
 
+/// Tool handler that sends requests to the gRPC client and waits for responses.
+struct GrpcToolHandler {
+    /// Channel to send tool requests to the server (which forwards to client)
+    request_tx: mpsc::Sender<(ToolRequest, oneshot::Sender<ToolResult>)>,
+}
+
+#[async_trait]
+impl ToolHandler for GrpcToolHandler {
+    async fn invoke(&self, request: ToolRequest) -> ToolResult {
+        let (response_tx, response_rx) = oneshot::channel();
+
+        // Send request through channel
+        if self.request_tx.send((request, response_tx)).await.is_err() {
+            return ToolResult {
+                success: false,
+                output: "Tool handler channel closed".to_string(),
+            };
+        }
+
+        // Wait for response
+        match response_rx.await {
+            Ok(result) => result,
+            Err(_) => ToolResult {
+                success: false,
+                output: "Tool response channel closed".to_string(),
+            },
+        }
+    }
+}
+
 /// Run the execution with the given request and streams.
 async fn run_execution(
     req: ExecuteRequest,
@@ -97,27 +128,101 @@ async fn run_execution(
     let limits = convert_limits(&req.limits);
     let tools: Vec<ToolDefinition> = req.tools.iter().map(convert_tool).collect();
 
-    // IMPORTANT: Spawn the response handler task BEFORE building the sandbox,
-    // because build_with_storage makes VFS calls that need responses from the client.
-    let (tool_response_tx, mut tool_response_rx) = mpsc::channel::<proto::ToolResponse>(8);
+    // Create channel for tool requests
+    let (tool_request_tx, mut tool_request_rx) =
+        mpsc::channel::<(ToolRequest, oneshot::Sender<ToolResult>)>(8);
 
-    tokio::spawn({
+    // Create the tool handler
+    let tool_handler = GrpcToolHandler {
+        request_tx: tool_request_tx,
+    };
+
+    // Clone server_tx for the message handler task
+    let server_tx_for_tools = server_tx.clone();
+
+    // Spawn message handler task
+    // This task:
+    // 1. Handles VFS responses from the client
+    // 2. Forwards tool requests to the client
+    // 3. Routes tool responses back to the waiting handler
+    let message_handler = tokio::spawn({
         async move {
-            while let Some(Ok(msg)) = client_stream.next().await {
-                // Check if it's a VFS response
-                if response_handler.handle(&msg).await {
-                    continue;
-                }
+            // Map of pending tool requests: call_id -> response sender
+            let mut pending_tools: std::collections::HashMap<String, oneshot::Sender<ToolResult>> =
+                std::collections::HashMap::new();
 
-                // Check if it's a tool response
-                if let Some(ClientMsg::ToolResponse(resp)) = msg.msg {
-                    let _ = tool_response_tx.send(resp).await;
+            loop {
+                tokio::select! {
+                    // Handle outgoing tool requests
+                    Some((request, response_tx)) = tool_request_rx.recv() => {
+                        let call_id = format!("call-{}", pending_tools.len() + 1);
+
+                        // Send tool request to client
+                        let _ = server_tx_for_tools
+                            .send(ServerMessage {
+                                msg: Some(ServerMsg::ToolRequest(proto::ToolRequest {
+                                    call_id: call_id.clone(),
+                                    tool: request.tool.clone(),
+                                    params_json: request.params.clone(),
+                                    stdin: request.stdin.unwrap_or_default(),
+                                })),
+                            })
+                            .await;
+
+                        // Store the response sender
+                        pending_tools.insert(call_id, response_tx);
+                    }
+
+                    // Handle incoming client messages
+                    msg = client_stream.next() => {
+                        match msg {
+                            Some(Ok(msg)) => {
+                                // Check if it's a VFS response
+                                if response_handler.handle(&msg).await {
+                                    continue;
+                                }
+
+                                // Check if it's a tool response
+                                if let Some(ClientMsg::ToolResponse(resp)) = msg.msg {
+                                    if let Some(response_tx) = pending_tools.remove(&resp.call_id) {
+                                        let result = match resp.result {
+                                            Some(proto::tool_response::Result::ResultJson(json)) => {
+                                                ToolResult {
+                                                    success: true,
+                                                    output: json,
+                                                }
+                                            }
+                                            Some(proto::tool_response::Result::Error(err)) => {
+                                                ToolResult {
+                                                    success: false,
+                                                    output: err,
+                                                }
+                                            }
+                                            None => ToolResult {
+                                                success: false,
+                                                output: "empty tool response".to_string(),
+                                            },
+                                        };
+                                        let _ = response_tx.send(result);
+                                    }
+                                }
+                            }
+                            Some(Err(e)) => {
+                                tracing::error!("Client stream error: {}", e);
+                                break;
+                            }
+                            None => {
+                                tracing::debug!("Client stream ended");
+                                break;
+                            }
+                        }
+                    }
                 }
             }
         }
     });
 
-    // Build the agent sandbox with remote storage
+    // Build the agent sandbox with remote storage and tool handler
     let mut builder = AgentSandbox::builder(&req.agent_id);
 
     if let Some(ref metadata) = req.metadata {
@@ -136,6 +241,9 @@ async fn run_execution(
         builder = builder.tool(tool);
     }
 
+    // Set up the tool handler
+    builder = builder.tool_handler(tool_handler);
+
     // Build with the remote storage - this makes VFS calls!
     tracing::debug!("Building sandbox for agent {}", req.agent_id);
     let sandbox = builder
@@ -143,109 +251,54 @@ async fn run_execution(
         .await
         .map_err(|e| format!("failed to build sandbox: {}", e))?;
 
-    // Execute the script
+    // Execute the script - tool invocations happen via the callback
     tracing::debug!("Executing script");
-    let outcome = sandbox
-        .execute_with_tools(&req.script, &limits)
+    let result = sandbox
+        .execute(&req.script, &limits)
         .await
         .map_err(|e| format!("execution failed: {}", e))?;
 
-    match outcome {
-        ExecutionOutcome::Completed(result) => {
-            // Send stdout if any
-            if !result.stdout.is_empty() {
-                let _ = server_tx
-                    .send(ServerMessage {
-                        msg: Some(ServerMsg::Output(proto::Output {
-                            stream: proto::OutputStream::Stdout.into(),
-                            data: result.stdout.clone(),
-                        })),
-                    })
-                    .await;
-            }
-
-            // Send stderr if any
-            if !result.stderr.is_empty() {
-                let _ = server_tx
-                    .send(ServerMessage {
-                        msg: Some(ServerMsg::Output(proto::Output {
-                            stream: proto::OutputStream::Stderr.into(),
-                            data: result.stderr.clone(),
-                        })),
-                    })
-                    .await;
-            }
-
-            // Send completion
-            let _ = server_tx
-                .send(ServerMessage {
-                    msg: Some(ServerMsg::Completed(proto::Completed {
-                        exit_code: result.exit_code,
-                        truncated: result.truncated,
-                        stats: Some(proto::ExecutionStats {
-                            cpu_time_ms: result.stats.cpu_time_ms,
-                            wall_time_ms: result.stats.wall_time_ms,
-                            memory_bytes: result.stats.peak_memory_bytes,
-                        }),
-                    })),
-                })
-                .await;
-        }
-        ExecutionOutcome::ToolRequest(tool_req) => {
-            // Send tool request to client
-            let _ = server_tx
-                .send(ServerMessage {
-                    msg: Some(ServerMsg::ToolRequest(proto::ToolRequest {
-                        call_id: tool_req.call_id.clone(),
-                        tool: tool_req.tool.clone(),
-                        params_json: tool_req.params.to_string(),
-                        stdin: tool_req.stdin.map(|s| s.into_bytes()).unwrap_or_default(),
-                    })),
-                })
-                .await;
-
-            // Wait for tool response
-            if let Some(resp) = tool_response_rx.recv().await {
-                // Write the result back to the sandbox
-                let result = match resp.result {
-                    Some(proto::tool_response::Result::ResultJson(json)) => {
-                        match serde_json::from_str(&json) {
-                            Ok(value) => ToolResult::success(value),
-                            Err(_) => ToolResult::success(serde_json::Value::String(json)),
-                        }
-                    }
-                    Some(proto::tool_response::Result::Error(err)) => ToolResult::error(err),
-                    None => ToolResult::error("empty tool response"),
-                };
-
-                if let Err(e) = sandbox.write_tool_result(&tool_req.call_id, result).await {
-                    tracing::warn!("Failed to write tool result: {}", e);
-                }
-
-                // For now, send completed after tool response
-                // In a full implementation, we'd resume execution
-                let _ = server_tx
-                    .send(ServerMessage {
-                        msg: Some(ServerMsg::Completed(proto::Completed {
-                            exit_code: 0,
-                            truncated: false,
-                            stats: None,
-                        })),
-                    })
-                    .await;
-            } else {
-                // Client disconnected before sending tool response
-                let _ = server_tx
-                    .send(ServerMessage {
-                        msg: Some(ServerMsg::Error(proto::Error {
-                            message: "client disconnected before tool response".to_string(),
-                            retryable: true,
-                        })),
-                    })
-                    .await;
-            }
-        }
+    // Send stdout if any
+    if !result.stdout.is_empty() {
+        let _ = server_tx
+            .send(ServerMessage {
+                msg: Some(ServerMsg::Output(proto::Output {
+                    stream: proto::OutputStream::Stdout.into(),
+                    data: result.stdout.clone(),
+                })),
+            })
+            .await;
     }
+
+    // Send stderr if any
+    if !result.stderr.is_empty() {
+        let _ = server_tx
+            .send(ServerMessage {
+                msg: Some(ServerMsg::Output(proto::Output {
+                    stream: proto::OutputStream::Stderr.into(),
+                    data: result.stderr.clone(),
+                })),
+            })
+            .await;
+    }
+
+    // Send completion
+    let _ = server_tx
+        .send(ServerMessage {
+            msg: Some(ServerMsg::Completed(proto::Completed {
+                exit_code: result.exit_code,
+                truncated: result.truncated,
+                stats: Some(proto::ExecutionStats {
+                    cpu_time_ms: result.stats.cpu_time_ms,
+                    wall_time_ms: result.stats.wall_time_ms,
+                    memory_bytes: result.stats.peak_memory_bytes,
+                }),
+            })),
+        })
+        .await;
+
+    // Clean up the message handler
+    message_handler.abort();
 
     Ok(())
 }

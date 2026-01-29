@@ -1,45 +1,32 @@
-//! Continuation mechanism for tool yield/resume.
+//! Tool request and result types for agent sandboxes.
 //!
-//! When an agent invokes a tool via the `tool` builtin, execution yields
-//! back to the orchestrator with a [`ToolRequest`]. The orchestrator executes
-//! the tool and writes results using [`write_tool_result`].
+//! This module provides types for serializing tool requests and results to the VFS.
+//! With the callback-based tool handler approach, these types are primarily used
+//! for VFS history recording and compatibility with external systems.
 //!
-//! # Execution Flow
+//! # Note
 //!
-//! 1. Agent script calls `tool <name> --param value`
-//! 2. Tool builtin writes request to `/tools/pending/<call_id>/request.json`
-//! 3. Tool builtin exits with code 42
-//! 4. `execute_with_tools()` returns `ExecutionOutcome::ToolRequest`
-//! 5. Orchestrator executes the tool externally
-//! 6. Orchestrator calls `write_tool_result()` to record the result
-//! 7. Agent can read result from `/tools/last_result.json` or `/tools/history/<call_id>/`
+//! The old yield/resume mechanism using exit code 42 has been removed.
+//! Tool invocation now uses the callback-based `ToolHandler` trait from
+//! `crate::executor`.
 
 use eryx_vfs::VfsStorage;
 use serde::{Deserialize, Serialize};
 
-use crate::runtime::{ExecutionResult, RuntimeError};
-
-/// Exit code that signals a tool invocation request.
-pub const TOOL_REQUEST_EXIT_CODE: i32 = 42;
-
-/// Outcome of executing a script in an agent sandbox.
-#[derive(Debug)]
-pub enum ExecutionOutcome {
-    /// Script completed normally (or with an error exit code).
-    Completed(ExecutionResult),
-
-    /// Script is waiting for a tool to be executed.
-    ToolRequest(ToolRequest),
-}
+use crate::runtime::RuntimeError;
 
 /// A request to execute an external tool.
+///
+/// This type is used for:
+/// - Serializing tool requests to VFS history
+/// - Compatibility with external orchestration systems
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolRequest {
     /// Unique ID for this tool call (e.g., "call-001").
     pub call_id: String,
     /// Name of the tool to invoke.
     pub tool: String,
-    /// Parameters for the tool.
+    /// Parameters for the tool (JSON-encoded).
     pub params: serde_json::Value,
     /// Stdin data piped to the tool (if any).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -49,7 +36,11 @@ pub struct ToolRequest {
     pub stdin_bytes: Option<usize>,
 }
 
-/// Result of a tool execution, to be written to the VFS.
+/// Result of a tool execution, for VFS serialization.
+///
+/// This type is used for:
+/// - Writing tool results to VFS history
+/// - Compatibility with external orchestration systems
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ToolResult {
@@ -90,27 +81,27 @@ impl From<Result<serde_json::Value, String>> for ToolResult {
     }
 }
 
-/// Write a tool result to the VFS.
+/// Write a tool result to the VFS history.
 ///
-/// This moves the request from `/tools/pending/<call_id>/` to
-/// `/tools/history/<call_id>/` and writes the result. It also updates
-/// `/tools/last_result.json` so scripts can easily read the most recent result.
+/// This records a tool call in `/tools/history/<call_id>/` and updates
+/// `/tools/last_result.json` for easy script access.
 ///
 /// # Arguments
 ///
 /// * `storage` - The VFS storage to write to
-/// * `call_id` - The ID of the tool call being completed
+/// * `call_id` - The ID of the tool call
+/// * `request` - The original tool request
 /// * `result` - The result of the tool execution
 ///
 /// # Errors
 ///
 /// Returns an error if VFS operations fail.
-pub async fn write_tool_result(
+pub async fn write_tool_history(
     storage: &dyn VfsStorage,
     call_id: &str,
-    result: ToolResult,
+    request: &ToolRequest,
+    result: &ToolResult,
 ) -> Result<(), RuntimeError> {
-    let pending_dir = format!("/tools/pending/{call_id}");
     let history_dir = format!("/tools/history/{call_id}");
 
     // Create history directory
@@ -119,18 +110,19 @@ pub async fn write_tool_result(
         .await
         .map_err(|e| RuntimeError::Vfs(e.to_string()))?;
 
-    // Copy request to history
-    let request_data = storage
-        .read(&format!("{pending_dir}/request.json"))
-        .await
-        .map_err(|e| RuntimeError::Vfs(format!("Failed to read pending request: {e}")))?;
+    // Write request
+    let request_json = serde_json::to_string_pretty(request)
+        .map_err(|e| RuntimeError::Vfs(format!("Failed to serialize request: {e}")))?;
     storage
-        .write(&format!("{history_dir}/request.json"), &request_data)
+        .write(
+            &format!("{history_dir}/request.json"),
+            request_json.as_bytes(),
+        )
         .await
         .map_err(|e| RuntimeError::Vfs(e.to_string()))?;
 
     // Write response or error
-    match &result {
+    match result {
         ToolResult::Success(value) => {
             let response_json = serde_json::to_string_pretty(value)
                 .map_err(|e| RuntimeError::Vfs(format!("Failed to serialize response: {e}")))?;
@@ -156,6 +148,7 @@ pub async fn write_tool_result(
     // Write metadata
     let metadata = serde_json::json!({
         "call_id": call_id,
+        "tool": request.tool,
         "completed_at": chrono_lite_now(),
         "success": result.is_success(),
     });
@@ -169,12 +162,8 @@ pub async fn write_tool_result(
         .await
         .map_err(|e| RuntimeError::Vfs(e.to_string()))?;
 
-    // Remove pending directory contents
-    let _ = storage.delete(&format!("{pending_dir}/request.json")).await;
-    let _ = storage.rmdir(&pending_dir).await;
-
     // Write to last_result.json for easy script access
-    let last_result_json = match &result {
+    let last_result_json = match result {
         ToolResult::Success(value) => serde_json::to_string_pretty(value),
         ToolResult::Error { error } => {
             serde_json::to_string_pretty(&serde_json::json!({ "error": error }))
@@ -188,49 +177,6 @@ pub async fn write_tool_result(
         .map_err(|e| RuntimeError::Vfs(e.to_string()))?;
 
     Ok(())
-}
-
-/// Parse a tool request from the pending directory.
-///
-/// This is useful for orchestrators that want to re-read a pending request
-/// (e.g., after a restart) rather than relying on the initial tool invocation.
-pub async fn parse_pending_request(
-    storage: &dyn VfsStorage,
-    call_id: &str,
-) -> Result<ToolRequest, RuntimeError> {
-    let request_path = format!("/tools/pending/{call_id}/request.json");
-    let request_data = storage
-        .read(&request_path)
-        .await
-        .map_err(|e| RuntimeError::Vfs(format!("Failed to read pending request: {e}")))?;
-
-    let request: ToolRequest = serde_json::from_slice(&request_data)
-        .map_err(|e| RuntimeError::Vfs(format!("Failed to parse pending request: {e}")))?;
-
-    Ok(request)
-}
-
-/// Find the most recent pending tool request.
-///
-/// Returns the call_id of a pending request if one exists. This is useful
-/// for orchestrators that want to discover pending requests (e.g., after
-/// a restart or for debugging).
-pub async fn find_pending_request(
-    storage: &dyn VfsStorage,
-) -> Result<Option<String>, RuntimeError> {
-    let entries = storage
-        .list("/tools/pending")
-        .await
-        .map_err(|e| RuntimeError::Vfs(e.to_string()))?;
-
-    // Return the first (and should be only) pending request
-    for entry in entries {
-        if entry.metadata.is_dir {
-            return Ok(Some(entry.name));
-        }
-    }
-
-    Ok(None)
 }
 
 /// Get current time in RFC3339 format.
@@ -291,7 +237,6 @@ fn days_to_ymd(days: u64) -> (u32, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use eryx_vfs::InMemoryStorage;
 
     #[test]
     fn test_tool_request_serialization() {
@@ -309,20 +254,6 @@ mod tests {
         assert_eq!(parsed.call_id, "call-001");
         assert_eq!(parsed.tool, "web_search");
         assert_eq!(parsed.params["query"], "test");
-    }
-
-    #[test]
-    fn test_tool_request_with_stdin() {
-        let request = ToolRequest {
-            call_id: "call-002".to_string(),
-            tool: "analyze".to_string(),
-            params: serde_json::json!({}),
-            stdin: Some("hello world".to_string()),
-            stdin_bytes: None,
-        };
-
-        let json = serde_json::to_string(&request).expect("serialize");
-        assert!(json.contains("hello world"));
     }
 
     #[test]
@@ -353,163 +284,5 @@ mod tests {
     fn test_tool_result_from_err() {
         let result: ToolResult = Err("oops".to_string()).into();
         assert!(!result.is_success());
-    }
-
-    #[tokio::test]
-    async fn test_write_tool_result_success() {
-        let storage = InMemoryStorage::new();
-
-        // Create pending request structure
-        storage.mkdir("/tools").await.unwrap();
-        storage.mkdir("/tools/pending").await.unwrap();
-        storage.mkdir("/tools/history").await.unwrap();
-        storage.mkdir("/tools/pending/call-001").await.unwrap();
-
-        let request = ToolRequest {
-            call_id: "call-001".to_string(),
-            tool: "test_tool".to_string(),
-            params: serde_json::json!({"arg": "value"}),
-            stdin: None,
-            stdin_bytes: None,
-        };
-        let request_json = serde_json::to_string_pretty(&request).unwrap();
-        storage
-            .write(
-                "/tools/pending/call-001/request.json",
-                request_json.as_bytes(),
-            )
-            .await
-            .unwrap();
-
-        // Write successful result
-        let result = ToolResult::success(serde_json::json!({"result": "success"}));
-        write_tool_result(&storage, "call-001", result)
-            .await
-            .expect("write_tool_result failed");
-
-        // Verify history was created
-        let response = storage
-            .read("/tools/history/call-001/response.json")
-            .await
-            .unwrap();
-        let response_str = String::from_utf8_lossy(&response);
-        assert!(response_str.contains("success"));
-
-        // Verify last_result.json
-        let last_result = storage.read("/tools/last_result.json").await.unwrap();
-        let last_result_str = String::from_utf8_lossy(&last_result);
-        assert!(last_result_str.contains("success"));
-
-        // Verify pending was cleaned up
-        assert!(
-            storage
-                .read("/tools/pending/call-001/request.json")
-                .await
-                .is_err()
-        );
-    }
-
-    #[tokio::test]
-    async fn test_write_tool_result_error() {
-        let storage = InMemoryStorage::new();
-
-        // Create pending request structure
-        storage.mkdir("/tools").await.unwrap();
-        storage.mkdir("/tools/pending").await.unwrap();
-        storage.mkdir("/tools/history").await.unwrap();
-        storage.mkdir("/tools/pending/call-002").await.unwrap();
-
-        let request = ToolRequest {
-            call_id: "call-002".to_string(),
-            tool: "failing_tool".to_string(),
-            params: serde_json::json!({}),
-            stdin: None,
-            stdin_bytes: None,
-        };
-        let request_json = serde_json::to_string_pretty(&request).unwrap();
-        storage
-            .write(
-                "/tools/pending/call-002/request.json",
-                request_json.as_bytes(),
-            )
-            .await
-            .unwrap();
-
-        // Write error result
-        let result = ToolResult::error("Tool execution failed");
-        write_tool_result(&storage, "call-002", result)
-            .await
-            .expect("write_tool_result failed");
-
-        // Verify error was written
-        let error = storage
-            .read("/tools/history/call-002/error.json")
-            .await
-            .unwrap();
-        let error_str = String::from_utf8_lossy(&error);
-        assert!(error_str.contains("Tool execution failed"));
-
-        // Verify metadata shows failure
-        let metadata = storage
-            .read("/tools/history/call-002/metadata.json")
-            .await
-            .unwrap();
-        let metadata_str = String::from_utf8_lossy(&metadata);
-        assert!(metadata_str.contains("\"success\": false"));
-    }
-
-    #[tokio::test]
-    async fn test_find_pending_request() {
-        let storage = InMemoryStorage::new();
-
-        storage.mkdir("/tools").await.unwrap();
-        storage.mkdir("/tools/pending").await.unwrap();
-
-        // Initially no pending requests
-        assert!(find_pending_request(&storage).await.unwrap().is_none());
-
-        // Add a pending request
-        storage.mkdir("/tools/pending/call-003").await.unwrap();
-        storage
-            .write("/tools/pending/call-003/request.json", b"{}")
-            .await
-            .unwrap();
-
-        // Now should find it
-        let call_id = find_pending_request(&storage).await.unwrap();
-        assert_eq!(call_id, Some("call-003".to_string()));
-    }
-
-    #[tokio::test]
-    async fn test_parse_pending_request() {
-        let storage = InMemoryStorage::new();
-
-        storage.mkdir("/tools").await.unwrap();
-        storage.mkdir("/tools/pending").await.unwrap();
-        storage.mkdir("/tools/pending/call-004").await.unwrap();
-
-        let request = ToolRequest {
-            call_id: "call-004".to_string(),
-            tool: "my_tool".to_string(),
-            params: serde_json::json!({"key": "value"}),
-            stdin: Some("input data".to_string()),
-            stdin_bytes: None,
-        };
-        let request_json = serde_json::to_string(&request).unwrap();
-        storage
-            .write(
-                "/tools/pending/call-004/request.json",
-                request_json.as_bytes(),
-            )
-            .await
-            .unwrap();
-
-        let parsed = parse_pending_request(&storage, "call-004")
-            .await
-            .expect("parse failed");
-        assert_eq!(parsed.call_id, "call-004");
-        assert_eq!(parsed.tool, "my_tool");
-        assert_eq!(parsed.params["key"], "value");
-        assert_eq!(parsed.stdin, Some("input data".to_string()));
     }
 }

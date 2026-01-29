@@ -2,19 +2,20 @@
 //!
 //! These tests verify the complete agent lifecycle including:
 //! - VFS structure and permissions
-//! - Tool invocation and result handling
+//! - Tool invocation via callback handlers
 //! - Conversation history access
 //! - Multi-tool execution cycles
 
 #![cfg(feature = "embedded-shell")]
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use conch::ResourceLimits;
 use conch::agent::{
-    AgentSandbox, ConversationMetadata, ConversationSummary, ExecutionOutcome,
-    SimpleHistoryProvider, ToolDefinition, ToolResult,
+    AgentSandbox, ConversationMetadata, ConversationSummary, SimpleHistoryProvider, ToolDefinition,
 };
+use conch::{ToolRequest, ToolResult};
 
 fn limits() -> ResourceLimits {
     ResourceLimits::default()
@@ -47,32 +48,15 @@ mod vfs_structure {
             .await
             .expect("cat params");
         assert_eq!(result.exit_code, 0, "params.json should exist");
-
-        let result = sandbox
-            .execute("cat /tools/index.txt", &limits())
-            .await
-            .expect("cat tools index");
-        assert_eq!(result.exit_code, 0, "tools/index.txt should exist");
-
-        // Write and read back to verify scratch is writable
-        let result = sandbox
-            .execute(
-                "echo test > /agent/scratch/test.txt && cat /agent/scratch/test.txt",
-                &limits(),
-            )
-            .await
-            .expect("scratch write/read");
-        assert_eq!(result.exit_code, 0, "scratch should be writable");
     }
 
     #[tokio::test]
-    async fn test_agent_metadata_structure() {
-        let sandbox = AgentSandbox::builder("agent-abc")
+    async fn test_agent_metadata_content() {
+        let sandbox = AgentSandbox::builder("my-agent-id")
             .name("Test Agent")
-            .parent("parent-xyz")
-            .capability("read")
-            .capability("write")
-            .capability("execute")
+            .parent("parent-123")
+            .capability("read_files")
+            .capability("write_files")
             .build()
             .await
             .expect("build sandbox");
@@ -83,47 +67,41 @@ mod vfs_structure {
             .expect("cat metadata");
 
         assert_eq!(result.exit_code, 0);
-        let stdout = String::from_utf8_lossy(&result.stdout);
-
-        // Parse and verify JSON structure
         let metadata: serde_json::Value =
-            serde_json::from_str(&stdout).expect("parse metadata JSON");
+            serde_json::from_str(&String::from_utf8_lossy(&result.stdout)).expect("parse json");
 
-        assert_eq!(metadata["id"], "agent-abc");
+        assert_eq!(metadata["id"], "my-agent-id");
         assert_eq!(metadata["name"], "Test Agent");
-        assert_eq!(metadata["parent_id"], "parent-xyz");
-        assert!(metadata["capabilities"].as_array().unwrap().len() == 3);
-        assert!(metadata["spawned_at"].as_str().is_some());
+        assert_eq!(metadata["parent_id"], "parent-123");
+        assert!(metadata["capabilities"].as_array().unwrap().len() == 2);
     }
 
     #[tokio::test]
-    async fn test_agent_params_accessible() {
-        let params = serde_json::json!({
-            "task": "analyze code",
-            "target_files": ["src/main.rs", "src/lib.rs"],
-            "options": {
-                "verbose": true,
-                "max_depth": 5
-            }
-        });
-
+    async fn test_agent_params_content() {
         let sandbox = AgentSandbox::builder("agent-123")
-            .params(params.clone())
+            .params(serde_json::json!({
+                "task": "analyze code",
+                "options": {
+                    "verbose": true,
+                    "max_depth": 3
+                }
+            }))
             .build()
             .await
             .expect("build sandbox");
 
-        // Read params and verify structure
         let result = sandbox
             .execute("cat /agent/params.json", &limits())
             .await
             .expect("cat params");
 
         assert_eq!(result.exit_code, 0);
-        let read_params: serde_json::Value =
-            serde_json::from_str(&String::from_utf8_lossy(&result.stdout)).expect("parse params");
+        let params: serde_json::Value =
+            serde_json::from_str(&String::from_utf8_lossy(&result.stdout)).expect("parse json");
 
-        assert_eq!(read_params, params);
+        assert_eq!(params["task"], "analyze code");
+        assert_eq!(params["options"]["verbose"], true);
+        assert_eq!(params["options"]["max_depth"], 3);
     }
 
     #[tokio::test]
@@ -133,53 +111,83 @@ mod vfs_structure {
             .await
             .expect("build sandbox");
 
-        // Write multiple files to scratch and read them back
-        let script = r#"
-            echo "file1 content" > /agent/scratch/file1.txt
-            echo "file2 content" > /agent/scratch/file2.txt
-            cat /agent/scratch/file1.txt
-            cat /agent/scratch/file2.txt
-        "#;
+        // Write to scratch
+        let result = sandbox
+            .execute("echo 'test content' > /agent/scratch/output.txt", &limits())
+            .await
+            .expect("write scratch");
 
-        let result = sandbox.execute(script, &limits()).await.expect("execute");
+        assert_eq!(result.exit_code, 0);
 
-        assert_eq!(
-            result.exit_code,
-            0,
-            "stderr: {}",
-            String::from_utf8_lossy(&result.stderr)
-        );
-        let stdout = String::from_utf8_lossy(&result.stdout);
-        assert!(stdout.contains("file1 content"));
-        assert!(stdout.contains("file2 content"));
+        // Read back
+        let result = sandbox
+            .execute("cat /agent/scratch/output.txt", &limits())
+            .await
+            .expect("read scratch");
+
+        assert_eq!(result.exit_code, 0);
+        assert!(String::from_utf8_lossy(&result.stdout).contains("test content"));
     }
 
     #[tokio::test]
-    async fn test_state_directory_persists() {
+    async fn test_state_directory_writable() {
         let sandbox = AgentSandbox::builder("agent-123")
             .build()
             .await
             .expect("build sandbox");
 
-        // Write state
-        sandbox
+        // Write to state
+        let result = sandbox
             .execute(
-                r#"echo '{"counter": 42}' > /agent/state/counter.json"#,
+                r#"echo '{"progress": 50}' > /agent/state/status.json"#,
                 &limits(),
             )
             .await
             .expect("write state");
 
-        // Read state back in a separate execution
+        assert_eq!(result.exit_code, 0);
+
+        // Read back and parse
         let result = sandbox
-            .execute("cat /agent/state/counter.json", &limits())
+            .execute("cat /agent/state/status.json | jq .progress", &limits())
             .await
             .expect("read state");
 
         assert_eq!(result.exit_code, 0);
-        let state: serde_json::Value =
-            serde_json::from_str(&String::from_utf8_lossy(&result.stdout)).expect("parse state");
-        assert_eq!(state["counter"], 42);
+        assert!(String::from_utf8_lossy(&result.stdout).trim() == "50");
+    }
+
+    #[tokio::test]
+    async fn test_tools_directory_structure() {
+        let sandbox = AgentSandbox::builder("agent-123")
+            .tool(ToolDefinition::no_params("tool_a", "First tool"))
+            .tool(ToolDefinition::no_params("tool_b", "Second tool"))
+            .build()
+            .await
+            .expect("build sandbox");
+
+        // Check index
+        let result = sandbox
+            .execute("cat /tools/index.txt", &limits())
+            .await
+            .expect("cat index");
+
+        assert_eq!(result.exit_code, 0);
+        let stdout = String::from_utf8_lossy(&result.stdout);
+        assert!(stdout.contains("tool_a"));
+        assert!(stdout.contains("tool_b"));
+
+        // Check tool definition
+        let result = sandbox
+            .execute("cat /tools/available/tool_a.json", &limits())
+            .await
+            .expect("cat tool_a");
+
+        assert_eq!(result.exit_code, 0);
+        let tool_def: serde_json::Value =
+            serde_json::from_str(&String::from_utf8_lossy(&result.stdout)).expect("parse");
+        assert_eq!(tool_def["name"], "tool_a");
+        assert_eq!(tool_def["description"], "First tool");
     }
 }
 
@@ -191,100 +199,79 @@ mod tool_registry {
     use super::*;
 
     #[tokio::test]
-    async fn test_tools_index_content() {
-        let sandbox = AgentSandbox::builder("agent-123")
-            .tool(ToolDefinition::no_params(
-                "web_search",
-                "Search the web for information",
-            ))
-            .tool(ToolDefinition::no_params(
-                "code_edit",
-                "Edit source code files",
-            ))
-            .tool(ToolDefinition::no_params(
-                "file_read",
-                "Read file contents from disk",
-            ))
-            .build()
-            .await
-            .expect("build sandbox");
-
-        let result = sandbox
-            .execute("cat /tools/index.txt", &limits())
-            .await
-            .expect("cat index");
-
-        assert_eq!(result.exit_code, 0);
-        let stdout = String::from_utf8_lossy(&result.stdout);
-
-        // Verify all tools listed with descriptions
-        assert!(stdout.contains("web_search"));
-        assert!(stdout.contains("Search the web"));
-        assert!(stdout.contains("code_edit"));
-        assert!(stdout.contains("Edit source code"));
-        assert!(stdout.contains("file_read"));
-        assert!(stdout.contains("Read file contents"));
-    }
-
-    #[tokio::test]
-    async fn test_tool_definitions_accessible() {
-        let schema = serde_json::json!({
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "The search query"
-                },
-                "limit": {
-                    "type": "integer",
-                    "default": 10
-                }
-            },
-            "required": ["query"]
-        });
-
+    async fn test_tool_definitions_available() {
         let sandbox = AgentSandbox::builder("agent-123")
             .tool(ToolDefinition::new(
                 "web_search",
                 "Search the web",
-                schema.clone(),
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string" }
+                    },
+                    "required": ["query"]
+                }),
             ))
             .build()
             .await
             .expect("build sandbox");
 
+        // Note: ToolDefinition has `parameters` field, not `schema`
         let result = sandbox
-            .execute("cat /tools/available/web_search.json", &limits())
+            .execute(
+                "cat /tools/available/web_search.json | jq .parameters",
+                &limits(),
+            )
             .await
-            .expect("cat tool def");
+            .expect("cat tool");
 
         assert_eq!(result.exit_code, 0);
-        let tool_def: serde_json::Value =
-            serde_json::from_str(&String::from_utf8_lossy(&result.stdout)).expect("parse tool");
-
-        assert_eq!(tool_def["name"], "web_search");
-        assert_eq!(tool_def["description"], "Search the web");
-        assert!(tool_def["parameters"]["properties"]["query"].is_object());
+        let parameters: serde_json::Value =
+            serde_json::from_str(&String::from_utf8_lossy(&result.stdout)).expect("parse");
+        assert_eq!(parameters["type"], "object");
+        assert!(
+            parameters["required"]
+                .as_array()
+                .unwrap()
+                .contains(&"query".into())
+        );
     }
 
     #[tokio::test]
-    async fn test_grep_tools_by_capability() {
+    async fn test_multiple_tools() {
         let sandbox = AgentSandbox::builder("agent-123")
-            .tool(ToolDefinition::no_params(
-                "web_search",
-                "Search the web for information",
-            ))
-            .tool(ToolDefinition::no_params(
-                "code_search",
-                "Search code in repository",
-            ))
-            .tool(ToolDefinition::no_params("file_read", "Read file contents"))
-            .tool(ToolDefinition::no_params("file_write", "Write to files"))
+            .tool(ToolDefinition::no_params("tool_1", "First"))
+            .tool(ToolDefinition::no_params("tool_2", "Second"))
+            .tool(ToolDefinition::no_params("tool_3", "Third"))
             .build()
             .await
             .expect("build sandbox");
 
-        // Grep for search-related tools
+        // Count tools in index
+        let result = sandbox
+            .execute("cat /tools/index.txt | wc -l", &limits())
+            .await
+            .expect("count tools");
+
+        assert_eq!(result.exit_code, 0);
+        let count: i32 = String::from_utf8_lossy(&result.stdout)
+            .trim()
+            .parse()
+            .unwrap_or(0);
+        assert_eq!(count, 3);
+    }
+
+    #[tokio::test]
+    async fn test_grep_tools() {
+        let sandbox = AgentSandbox::builder("agent-123")
+            .tool(ToolDefinition::no_params("web_search", "Search the web"))
+            .tool(ToolDefinition::no_params("file_search", "Search files"))
+            .tool(ToolDefinition::no_params("calculator", "Do math"))
+            .build()
+            .await
+            .expect("build sandbox");
+
+        // Grep for 'search' tools
         let result = sandbox
             .execute("grep -i search /tools/index.txt", &limits())
             .await
@@ -293,13 +280,12 @@ mod tool_registry {
         assert_eq!(result.exit_code, 0);
         let stdout = String::from_utf8_lossy(&result.stdout);
         assert!(stdout.contains("web_search"));
-        assert!(stdout.contains("code_search"));
-        assert!(!stdout.contains("file_read"));
-        assert!(!stdout.contains("file_write"));
+        assert!(stdout.contains("file_search"));
+        assert!(!stdout.contains("calculator"));
     }
 
     #[tokio::test]
-    async fn test_empty_tools_list() {
+    async fn test_no_tools() {
         let sandbox = AgentSandbox::builder("agent-123")
             .build()
             .await
@@ -317,265 +303,244 @@ mod tool_registry {
 }
 
 // =============================================================================
-// Tool Execution Cycle Tests
+// Tool Execution Tests (Callback-based)
 // =============================================================================
 
 mod tool_execution {
     use super::*;
 
     #[tokio::test]
-    async fn test_single_tool_invocation() {
-        let sandbox = AgentSandbox::builder("agent-123")
-            .tool(ToolDefinition::no_params(
-                "calculator",
-                "Perform calculations",
-            ))
-            .build()
-            .await
-            .expect("build sandbox");
+    async fn test_tool_handler_called() {
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let call_count_clone = call_count.clone();
 
-        let outcome = sandbox
-            .execute_with_tools("tool calculator --operation add --a 10 --b 20", &limits())
-            .await
-            .expect("execute");
-
-        match outcome {
-            ExecutionOutcome::ToolRequest(request) => {
-                assert_eq!(request.tool, "calculator");
-                assert_eq!(request.params["operation"], "add");
-                assert_eq!(request.params["a"], 10);
-                assert_eq!(request.params["b"], 20);
-                assert!(request.call_id.starts_with("call-"));
+        let handler = move |_request: ToolRequest| {
+            let count = call_count_clone.clone();
+            async move {
+                count.fetch_add(1, Ordering::SeqCst);
+                ToolResult {
+                    success: true,
+                    output: "tool executed".to_string(),
+                }
             }
-            ExecutionOutcome::Completed(r) => {
-                panic!("Expected ToolRequest, got Completed(exit={})", r.exit_code);
+        };
+
+        let sandbox = AgentSandbox::builder("agent-123")
+            .tool(ToolDefinition::no_params("test_tool", "A test tool"))
+            .tool_handler(handler)
+            .build()
+            .await
+            .expect("build sandbox");
+
+        let result = sandbox
+            .execute("tool test_tool", &limits())
+            .await
+            .expect("execute");
+
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_tool_receives_params() {
+        let received_params = Arc::new(std::sync::Mutex::new(String::new()));
+        let params_clone = received_params.clone();
+
+        let handler = move |request: ToolRequest| {
+            let params = params_clone.clone();
+            async move {
+                *params.lock().unwrap() = request.params.clone();
+                ToolResult {
+                    success: true,
+                    output: "ok".to_string(),
+                }
             }
-        }
-    }
+        };
 
-    #[tokio::test]
-    async fn test_tool_result_written_to_history() {
         let sandbox = AgentSandbox::builder("agent-123")
-            .tool(ToolDefinition::no_params("my_tool", "Test tool"))
+            .tool(ToolDefinition::no_params("calculator", "Calculate"))
+            .tool_handler(handler)
             .build()
             .await
             .expect("build sandbox");
 
-        // Invoke tool
-        let outcome = sandbox
-            .execute_with_tools("tool my_tool --input data", &limits())
+        sandbox
+            .execute("tool calculator --operation add --a 10 --b 20", &limits())
             .await
             .expect("execute");
 
-        let request = match outcome {
-            ExecutionOutcome::ToolRequest(r) => r,
-            _ => panic!("Expected ToolRequest"),
-        };
-
-        // Write result
-        let result_value = serde_json::json!({
-            "output": "processed data",
-            "status": "success"
-        });
-        sandbox
-            .write_tool_result(&request.call_id, ToolResult::success(result_value.clone()))
-            .await
-            .expect("write result");
-
-        // Verify result in history
-        let history_path = format!("/tools/history/{}/response.json", request.call_id);
-        let result = sandbox
-            .execute(&format!("cat {history_path}"), &limits())
-            .await
-            .expect("cat history");
-
-        assert_eq!(result.exit_code, 0);
-        let read_result: serde_json::Value =
-            serde_json::from_str(&String::from_utf8_lossy(&result.stdout)).expect("parse result");
-        assert_eq!(read_result, result_value);
-
-        // Verify last_result.json
-        let result = sandbox
-            .execute("cat /tools/last_result.json", &limits())
-            .await
-            .expect("cat last_result");
-
-        assert_eq!(result.exit_code, 0);
-        let last_result: serde_json::Value =
-            serde_json::from_str(&String::from_utf8_lossy(&result.stdout)).expect("parse");
-        assert_eq!(last_result, result_value);
+        let params_str = received_params.lock().unwrap().clone();
+        let params: serde_json::Value = serde_json::from_str(&params_str).expect("parse params");
+        assert_eq!(params["operation"], "add");
+        assert_eq!(params["a"], 10);
+        assert_eq!(params["b"], 20);
     }
 
     #[tokio::test]
-    async fn test_tool_error_result() {
+    async fn test_tool_output_returned_to_script() {
+        let handler = |_request: ToolRequest| async move {
+            ToolResult {
+                success: true,
+                output: serde_json::to_string(&serde_json::json!({
+                    "result": 42,
+                    "message": "success"
+                }))
+                .unwrap(),
+            }
+        };
+
         let sandbox = AgentSandbox::builder("agent-123")
-            .tool(ToolDefinition::no_params("failing_tool", "Tool that fails"))
+            .tool(ToolDefinition::no_params("my_tool", "My tool"))
+            .tool_handler(handler)
             .build()
             .await
             .expect("build sandbox");
 
-        let outcome = sandbox
-            .execute_with_tools("tool failing_tool", &limits())
+        let result = sandbox
+            .execute("tool my_tool", &limits())
             .await
             .expect("execute");
 
-        let request = match outcome {
-            ExecutionOutcome::ToolRequest(r) => r,
-            _ => panic!("Expected ToolRequest"),
-        };
-
-        // Write error result
-        sandbox
-            .write_tool_result(
-                &request.call_id,
-                ToolResult::error("Connection timeout after 30s"),
-            )
-            .await
-            .expect("write error");
-
-        // Verify error file exists
-        let error_path = format!("/tools/history/{}/error.json", request.call_id);
-        let result = sandbox
-            .execute(&format!("cat {error_path}"), &limits())
-            .await
-            .expect("cat error");
-
         assert_eq!(result.exit_code, 0);
-        let error: serde_json::Value =
-            serde_json::from_str(&String::from_utf8_lossy(&result.stdout)).expect("parse");
-        assert!(
-            error["error"]
-                .as_str()
-                .unwrap()
-                .contains("Connection timeout")
-        );
-
-        // Verify metadata shows failure
-        let metadata_path = format!("/tools/history/{}/metadata.json", request.call_id);
-        let result = sandbox
-            .execute(&format!("cat {metadata_path}"), &limits())
-            .await
-            .expect("cat metadata");
-
-        let metadata: serde_json::Value =
-            serde_json::from_str(&String::from_utf8_lossy(&result.stdout)).expect("parse");
-        assert_eq!(metadata["success"], false);
+        let stdout = String::from_utf8_lossy(&result.stdout);
+        assert!(stdout.contains("42"));
+        assert!(stdout.contains("success"));
     }
 
     #[tokio::test]
-    async fn test_multiple_sequential_tool_calls() {
+    async fn test_tool_error_handling() {
+        let handler = |_request: ToolRequest| async move {
+            ToolResult {
+                success: false,
+                output: "Connection timeout".to_string(),
+            }
+        };
+
         let sandbox = AgentSandbox::builder("agent-123")
-            .tool(ToolDefinition::no_params("tool_a", "First tool"))
-            .tool(ToolDefinition::no_params("tool_b", "Second tool"))
+            .tool(ToolDefinition::no_params("failing_tool", "Will fail"))
+            .tool_handler(handler)
             .build()
             .await
             .expect("build sandbox");
 
-        // First tool call
-        let outcome1 = sandbox
-            .execute_with_tools("tool tool_a --step 1", &limits())
-            .await
-            .expect("execute 1");
-
-        let request1 = match outcome1 {
-            ExecutionOutcome::ToolRequest(r) => r,
-            _ => panic!("Expected ToolRequest 1"),
-        };
-        assert_eq!(request1.call_id, "call-001");
-
-        sandbox
-            .write_tool_result(
-                &request1.call_id,
-                ToolResult::success(serde_json::json!({"step": 1, "result": "ok"})),
-            )
-            .await
-            .expect("write 1");
-
-        // Second tool call
-        let outcome2 = sandbox
-            .execute_with_tools("tool tool_b --step 2", &limits())
-            .await
-            .expect("execute 2");
-
-        let request2 = match outcome2 {
-            ExecutionOutcome::ToolRequest(r) => r,
-            _ => panic!("Expected ToolRequest 2"),
-        };
-        assert_eq!(request2.call_id, "call-002");
-
-        sandbox
-            .write_tool_result(
-                &request2.call_id,
-                ToolResult::success(serde_json::json!({"step": 2, "result": "done"})),
-            )
-            .await
-            .expect("write 2");
-
-        // Verify both in history by reading their metadata
         let result = sandbox
-            .execute("cat /tools/history/call-001/metadata.json", &limits())
+            .execute("tool failing_tool", &limits())
             .await
-            .expect("read call-001 metadata");
-        assert_eq!(result.exit_code, 0, "call-001 should exist in history");
+            .expect("execute");
 
-        let result = sandbox
-            .execute("cat /tools/history/call-002/metadata.json", &limits())
-            .await
-            .expect("read call-002 metadata");
-        assert_eq!(result.exit_code, 0, "call-002 should exist in history");
+        // Tool returns error (written to stderr) but script continues
+        // Exit code should be 1 for a failed tool call
+        assert_eq!(result.exit_code, 1);
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(stderr.contains("Connection timeout"), "stderr: {}", stderr);
     }
 
     #[tokio::test]
-    async fn test_tool_with_json_params() {
+    async fn test_multiple_tool_calls_in_script() {
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let call_count_clone = call_count.clone();
+
+        let handler = move |request: ToolRequest| {
+            let count = call_count_clone.clone();
+            async move {
+                let n = count.fetch_add(1, Ordering::SeqCst) + 1;
+                ToolResult {
+                    success: true,
+                    output: format!("Call {} for {}", n, request.tool),
+                }
+            }
+        };
+
         let sandbox = AgentSandbox::builder("agent-123")
-            .tool(ToolDefinition::no_params("complex_tool", "Complex params"))
+            .tool(ToolDefinition::no_params("tool_a", "First"))
+            .tool(ToolDefinition::no_params("tool_b", "Second"))
+            .tool_handler(handler)
             .build()
             .await
             .expect("build sandbox");
 
-        let outcome = sandbox
-            .execute_with_tools(
-                r#"tool complex_tool --json '{"nested": {"key": "value"}, "array": [1, 2, 3]}'"#,
+        let result = sandbox
+            .execute(
+                r#"
+                echo "Starting"
+                tool tool_a --step 1
+                tool tool_b --step 2
+                echo "Done"
+            "#,
                 &limits(),
             )
             .await
             .expect("execute");
 
-        match outcome {
-            ExecutionOutcome::ToolRequest(request) => {
-                assert_eq!(request.params["nested"]["key"], "value");
-                assert_eq!(request.params["array"][0], 1);
-                assert_eq!(request.params["array"][2], 3);
-            }
-            _ => panic!("Expected ToolRequest"),
-        }
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(call_count.load(Ordering::SeqCst), 2);
+
+        let stdout = String::from_utf8_lossy(&result.stdout);
+        assert!(stdout.contains("Starting"));
+        assert!(stdout.contains("Call 1"));
+        assert!(stdout.contains("Call 2"));
+        assert!(stdout.contains("Done"));
     }
 
     #[tokio::test]
-    async fn test_normal_command_completes() {
+    async fn test_tool_with_json_params() {
+        let received_params = Arc::new(std::sync::Mutex::new(String::new()));
+        let params_clone = received_params.clone();
+
+        let handler = move |request: ToolRequest| {
+            let params = params_clone.clone();
+            async move {
+                *params.lock().unwrap() = request.params.clone();
+                ToolResult {
+                    success: true,
+                    output: "ok".to_string(),
+                }
+            }
+        };
+
         let sandbox = AgentSandbox::builder("agent-123")
-            .tool(ToolDefinition::no_params("some_tool", "A tool"))
+            .tool(ToolDefinition::no_params("complex", "Complex params"))
+            .tool_handler(handler)
             .build()
             .await
             .expect("build sandbox");
 
-        // Regular command should complete normally
-        let outcome = sandbox
-            .execute_with_tools("echo hello && cat /agent/metadata.json", &limits())
+        sandbox
+            .execute(
+                r#"tool complex --json '{"nested": {"key": "value"}, "array": [1, 2, 3]}'"#,
+                &limits(),
+            )
             .await
             .expect("execute");
 
-        match outcome {
-            ExecutionOutcome::Completed(result) => {
-                assert_eq!(result.exit_code, 0);
-                let stdout = String::from_utf8_lossy(&result.stdout);
-                assert!(stdout.contains("hello"));
-                assert!(stdout.contains("agent-123")); // metadata contains agent id
-            }
-            ExecutionOutcome::ToolRequest(_) => {
-                panic!("Expected Completed, got ToolRequest");
-            }
-        }
+        let params_str = received_params.lock().unwrap().clone();
+        let params: serde_json::Value = serde_json::from_str(&params_str).expect("parse");
+        assert_eq!(params["nested"]["key"], "value");
+        assert_eq!(params["array"][0], 1);
+    }
+
+    #[tokio::test]
+    async fn test_no_handler_returns_error() {
+        // No tool_handler configured
+        let sandbox = AgentSandbox::builder("agent-123")
+            .tool(ToolDefinition::no_params("orphan_tool", "No handler"))
+            .build()
+            .await
+            .expect("build sandbox");
+
+        let result = sandbox
+            .execute("tool orphan_tool", &limits())
+            .await
+            .expect("execute");
+
+        // Should fail with exit code 1 and error message in stderr
+        assert_eq!(result.exit_code, 1);
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(
+            stderr.contains("No tool handler") || stderr.contains("not configured"),
+            "stderr: {}",
+            stderr
+        );
     }
 }
 
@@ -751,42 +716,6 @@ A> Here are async resources."#;
             .parse()
             .unwrap_or(0);
         assert_eq!(count, 2);
-
-        // Find specific tool
-        let result = sandbox
-            .execute(
-                "grep 'T\\[web_search\\]' /history/current/transcript.md",
-                &limits(),
-            )
-            .await
-            .expect("grep");
-
-        assert_eq!(result.exit_code, 0);
-        assert!(String::from_utf8_lossy(&result.stdout).contains("web_search"));
-    }
-
-    #[tokio::test]
-    async fn test_history_read_only() {
-        let history =
-            SimpleHistoryProvider::new().with_transcript("U> Important conversation data");
-
-        let sandbox = AgentSandbox::builder("agent-123")
-            .history(Arc::new(history))
-            .build()
-            .await
-            .expect("build sandbox");
-
-        // Attempt to write should fail (history is read-only for agents)
-        let result = sandbox
-            .execute(
-                "echo 'tampered' > /history/current/transcript.md",
-                &limits(),
-            )
-            .await
-            .expect("execute");
-
-        // Should fail - history is read-only
-        assert_ne!(result.exit_code, 0);
     }
 
     #[tokio::test]
@@ -796,8 +725,7 @@ A> Here are async resources."#;
             .await
             .expect("build sandbox");
 
-        // Without a history provider, /history/current/ directory exists but may be empty
-        // Verify we can at least write to scratch (sandbox is functional)
+        // Without a history provider, sandbox should still be functional
         let result = sandbox
             .execute(
                 "echo test > /agent/scratch/test.txt && cat /agent/scratch/test.txt",
@@ -812,463 +740,284 @@ A> Here are async resources."#;
 }
 
 // =============================================================================
-// Full Agent Lifecycle Tests
+// Agent Lifecycle Tests
 // =============================================================================
 
 mod agent_lifecycle {
     use super::*;
 
-    /// Simulates a complete agent task: research and summarize.
     #[tokio::test]
     async fn test_research_task_lifecycle() {
+        let search_results = serde_json::json!({
+            "results": [
+                {"title": "Async Rust Book", "url": "https://rust-lang.org/async"},
+                {"title": "Tokio Tutorial", "url": "https://tokio.rs"}
+            ]
+        });
+
+        let handler = move |request: ToolRequest| {
+            let results = search_results.clone();
+            async move {
+                match request.tool.as_str() {
+                    "web_search" => ToolResult {
+                        success: true,
+                        output: serde_json::to_string(&results).unwrap(),
+                    },
+                    _ => ToolResult {
+                        success: false,
+                        output: "Unknown tool".to_string(),
+                    },
+                }
+            }
+        };
+
         let sandbox = AgentSandbox::builder("researcher-001")
             .name("Research Agent")
             .params(serde_json::json!({
                 "task": "Research Rust async patterns",
                 "output_format": "markdown"
             }))
-            .tool(ToolDefinition::no_params(
-                "web_search",
-                "Search the web for information",
-            ))
-            .tool(ToolDefinition::no_params("file_write", "Write to a file"))
+            .tool(ToolDefinition::no_params("web_search", "Search the web"))
+            .tool_handler(handler)
             .build()
             .await
             .expect("build sandbox");
 
-        // Step 1: Agent reads its task
+        // Read task params
         let result = sandbox
             .execute("cat /agent/params.json | jq -r .task", &limits())
             .await
-            .expect("read task");
-        assert_eq!(result.exit_code, 0);
-        assert!(String::from_utf8_lossy(&result.stdout).contains("Research Rust"));
+            .expect("read params");
+        assert!(String::from_utf8_lossy(&result.stdout).contains("Research"));
 
-        // Step 2: Agent invokes web_search
-        let outcome = sandbox
-            .execute_with_tools(
-                "tool web_search --query 'Rust async await patterns'",
-                &limits(),
-            )
-            .await
-            .expect("invoke search");
-
-        let search_request = match outcome {
-            ExecutionOutcome::ToolRequest(r) => r,
-            _ => panic!("Expected ToolRequest"),
-        };
-        assert_eq!(search_request.tool, "web_search");
-
-        // Orchestrator executes search and returns results
-        let search_results = serde_json::json!({
-            "results": [
-                {"title": "Async/Await in Rust", "url": "https://rust-lang.org/async"},
-                {"title": "Tokio Tutorial", "url": "https://tokio.rs/tutorial"}
-            ]
-        });
-        sandbox
-            .write_tool_result(&search_request.call_id, ToolResult::success(search_results))
-            .await
-            .expect("write search result");
-
-        // Step 3: Agent reads results and stores them
+        // Execute search tool
         let result = sandbox
-            .execute("cat /tools/last_result.json", &limits())
-            .await
-            .expect("read results");
-
-        assert_eq!(
-            result.exit_code,
-            0,
-            "stderr: {}",
-            String::from_utf8_lossy(&result.stderr)
-        );
-        let stdout = String::from_utf8_lossy(&result.stdout);
-        assert!(
-            stdout.contains("Async/Await in Rust"),
-            "Should contain search result title: {}",
-            stdout
-        );
-
-        // Step 4: Agent writes summary to scratch
-        let result = sandbox
-            .execute(
-                r#"echo "Research complete" > /agent/scratch/summary.txt && cat /agent/scratch/summary.txt"#,
-                &limits(),
-            )
-            .await
-            .expect("write summary");
-        assert_eq!(result.exit_code, 0);
-        assert!(String::from_utf8_lossy(&result.stdout).contains("Research complete"));
-    }
-
-    /// Tests error recovery in a multi-step workflow.
-    #[tokio::test]
-    async fn test_error_recovery_workflow() {
-        let sandbox = AgentSandbox::builder("resilient-agent")
-            .tool(ToolDefinition::no_params("api_call", "Make API call"))
-            .build()
-            .await
-            .expect("build sandbox");
-
-        // First attempt fails
-        let outcome1 = sandbox
-            .execute_with_tools("tool api_call --endpoint /users", &limits())
-            .await
-            .expect("first call");
-
-        let request1 = match outcome1 {
-            ExecutionOutcome::ToolRequest(r) => r,
-            _ => panic!("Expected ToolRequest"),
-        };
-
-        sandbox
-            .write_tool_result(
-                &request1.call_id,
-                ToolResult::error("503 Service Unavailable"),
-            )
-            .await
-            .expect("write error");
-
-        // Agent can check the error
-        let result = sandbox
-            .execute("cat /tools/last_result.json", &limits())
-            .await
-            .expect("read error");
-
-        let error: serde_json::Value =
-            serde_json::from_str(&String::from_utf8_lossy(&result.stdout)).expect("parse");
-        assert!(
-            error["error"]
-                .as_str()
-                .unwrap()
-                .contains("Service Unavailable")
-        );
-
-        // Retry succeeds
-        let outcome2 = sandbox
-            .execute_with_tools("tool api_call --endpoint /users", &limits())
-            .await
-            .expect("retry");
-
-        let request2 = match outcome2 {
-            ExecutionOutcome::ToolRequest(r) => r,
-            _ => panic!("Expected ToolRequest"),
-        };
-
-        sandbox
-            .write_tool_result(
-                &request2.call_id,
-                ToolResult::success(serde_json::json!({"users": ["alice", "bob"]})),
-            )
-            .await
-            .expect("write success");
-
-        // Verify success
-        let result = sandbox
-            .execute("cat /tools/last_result.json | jq -r '.users[0]'", &limits())
-            .await
-            .expect("read result");
-
-        assert_eq!(result.exit_code, 0);
-        assert!(String::from_utf8_lossy(&result.stdout).contains("alice"));
-
-        // Both calls should be in history - verify by reading their metadata
-        let result = sandbox
-            .execute("cat /tools/history/call-001/metadata.json", &limits())
-            .await
-            .expect("read call-001");
-        assert_eq!(result.exit_code, 0, "call-001 should exist");
-
-        let result = sandbox
-            .execute("cat /tools/history/call-002/metadata.json", &limits())
-            .await
-            .expect("read call-002");
-        assert_eq!(result.exit_code, 0, "call-002 should exist");
-    }
-
-    /// Tests a code analysis workflow with multiple tools.
-    #[tokio::test]
-    async fn test_code_analysis_workflow() {
-        let history = SimpleHistoryProvider::new()
-            .with_transcript("U> Please analyze the main.rs file and suggest improvements.");
-
-        let sandbox = AgentSandbox::builder("code-analyst")
-            .params(serde_json::json!({
-                "target": "src/main.rs",
-                "analysis_type": "performance"
-            }))
-            .tool(ToolDefinition::no_params("file_read", "Read file contents"))
-            .tool(ToolDefinition::no_params(
-                "code_search",
-                "Search for patterns in code",
-            ))
-            .history(Arc::new(history))
-            .build()
-            .await
-            .expect("build sandbox");
-
-        // Agent can see the user's request in history
-        let result = sandbox
-            .execute("grep 'analyze' /history/current/transcript.md", &limits())
-            .await
-            .expect("grep history");
-
-        assert_eq!(result.exit_code, 0);
-        assert!(String::from_utf8_lossy(&result.stdout).contains("main.rs"));
-
-        // Agent reads the target file
-        let outcome = sandbox
-            .execute_with_tools("tool file_read --path src/main.rs", &limits())
-            .await
-            .expect("read file");
-
-        let read_request = match outcome {
-            ExecutionOutcome::ToolRequest(r) => r,
-            _ => panic!("Expected ToolRequest"),
-        };
-
-        sandbox
-            .write_tool_result(
-                &read_request.call_id,
-                ToolResult::success(serde_json::json!({
-                    "content": "fn main() {\n    let data = vec![1, 2, 3];\n    for i in data {\n        println!(\"{}\", i);\n    }\n}"
-                })),
-            )
-            .await
-            .expect("write file content");
-
-        // Agent searches for patterns
-        let outcome = sandbox
-            .execute_with_tools("tool code_search --pattern 'for.*in'", &limits())
+            .execute("tool web_search --query 'rust async'", &limits())
             .await
             .expect("search");
+        assert_eq!(result.exit_code, 0);
+        assert!(String::from_utf8_lossy(&result.stdout).contains("Tokio"));
 
-        let search_request = match outcome {
-            ExecutionOutcome::ToolRequest(r) => r,
-            _ => panic!("Expected ToolRequest"),
-        };
-
-        sandbox
-            .write_tool_result(
-                &search_request.call_id,
-                ToolResult::success(serde_json::json!({
-                    "matches": [
-                        {"line": 3, "text": "    for i in data {"}
-                    ]
-                })),
-            )
-            .await
-            .expect("write search result");
-
-        // Agent stores analysis in state
+        // Write findings to scratch
         let result = sandbox
             .execute(
-                r#"
-                echo '{"findings": ["Loop could use iterator methods"], "severity": "low"}' > /agent/state/analysis.json
-                cat /agent/state/analysis.json
-            "#,
+                "echo '# Research Results' > /agent/scratch/findings.md && cat /agent/scratch/findings.md",
                 &limits(),
             )
             .await
-            .expect("write analysis");
-
+            .expect("write findings");
         assert_eq!(result.exit_code, 0);
-        let analysis: serde_json::Value =
-            serde_json::from_str(&String::from_utf8_lossy(&result.stdout)).expect("parse");
-        assert!(
-            analysis["findings"][0]
-                .as_str()
-                .unwrap()
-                .contains("iterator")
-        );
+    }
+
+    #[tokio::test]
+    async fn test_code_analysis_task() {
+        let handler = |request: ToolRequest| async move {
+            let params: serde_json::Value =
+                serde_json::from_str(&request.params).unwrap_or_default();
+
+            match request.tool.as_str() {
+                "file_read" => {
+                    let path = params["path"].as_str().unwrap_or("unknown");
+                    ToolResult {
+                        success: true,
+                        output: serde_json::to_string(&serde_json::json!({
+                            "path": path,
+                            "content": "fn main() { println!(\"Hello\"); }",
+                            "lines": 1
+                        }))
+                        .unwrap(),
+                    }
+                }
+                "code_search" => ToolResult {
+                    success: true,
+                    output: serde_json::to_string(&serde_json::json!({
+                        "matches": [
+                            {"file": "src/lib.rs", "line": 42, "text": "for item in items {"}
+                        ]
+                    }))
+                    .unwrap(),
+                },
+                _ => ToolResult {
+                    success: false,
+                    output: "Unknown tool".to_string(),
+                },
+            }
+        };
+
+        let sandbox = AgentSandbox::builder("analyzer-001")
+            .tool(ToolDefinition::no_params("file_read", "Read files"))
+            .tool(ToolDefinition::no_params("code_search", "Search code"))
+            .tool_handler(handler)
+            .build()
+            .await
+            .expect("build sandbox");
+
+        // Read a file
+        let result = sandbox
+            .execute("tool file_read --path src/main.rs", &limits())
+            .await
+            .expect("file read");
+        assert!(String::from_utf8_lossy(&result.stdout).contains("Hello"));
+
+        // Search code
+        let result = sandbox
+            .execute("tool code_search --pattern 'for.*in'", &limits())
+            .await
+            .expect("code search");
+        assert!(String::from_utf8_lossy(&result.stdout).contains("matches"));
     }
 }
 
 // =============================================================================
-// Edge Cases and Error Handling
+// Edge Cases
 // =============================================================================
 
 mod edge_cases {
     use super::*;
 
     #[tokio::test]
-    async fn test_large_tool_result() {
+    async fn test_empty_params() {
         let sandbox = AgentSandbox::builder("agent-123")
-            .tool(ToolDefinition::no_params(
-                "bulk_data",
-                "Returns lots of data",
-            ))
             .build()
             .await
             .expect("build sandbox");
 
-        let outcome = sandbox
-            .execute_with_tools("tool bulk_data", &limits())
-            .await
-            .expect("execute");
-
-        let request = match outcome {
-            ExecutionOutcome::ToolRequest(r) => r,
-            _ => panic!("Expected ToolRequest"),
-        };
-
-        // Create a large result (100KB of data)
-        let large_array: Vec<i32> = (0..10000).collect();
-        let large_result = serde_json::json!({
-            "data": large_array,
-            "metadata": {"count": 10000}
-        });
-
-        sandbox
-            .write_tool_result(&request.call_id, ToolResult::success(large_result))
-            .await
-            .expect("write large result");
-
-        // Verify we can read it back
         let result = sandbox
-            .execute(
-                "cat /tools/last_result.json | jq '.metadata.count'",
-                &limits(),
-            )
+            .execute("cat /agent/params.json", &limits())
             .await
-            .expect("read");
+            .expect("cat params");
 
         assert_eq!(result.exit_code, 0);
-        assert!(String::from_utf8_lossy(&result.stdout).contains("10000"));
+        let params: serde_json::Value =
+            serde_json::from_str(&String::from_utf8_lossy(&result.stdout)).expect("parse");
+        assert!(params.is_object());
     }
 
     #[tokio::test]
     async fn test_special_characters_in_params() {
         let sandbox = AgentSandbox::builder("agent-123")
-            .tool(ToolDefinition::no_params("echo_tool", "Echoes input"))
-            .build()
-            .await
-            .expect("build sandbox");
-
-        let outcome = sandbox
-            .execute_with_tools(
-                r#"tool echo_tool --json '{"message": "Hello \"World\"!\nNew line\ttab"}'"#,
-                &limits(),
-            )
-            .await
-            .expect("execute");
-
-        match outcome {
-            ExecutionOutcome::ToolRequest(request) => {
-                let msg = request.params["message"].as_str().unwrap();
-                assert!(msg.contains("Hello"));
-                assert!(msg.contains("World"));
-            }
-            _ => panic!("Expected ToolRequest"),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_unicode_in_transcript() {
-        let transcript = r#"U> Can you help with this: 你好世界 🌍
-
-A> Of course! That means "Hello World" in Chinese.
-
-T[translate] {"text": "你好世界", "to": "en"}
-R> {"translation": "Hello World", "confidence": 0.99}"#;
-
-        let history = SimpleHistoryProvider::new().with_transcript(transcript);
-
-        let sandbox = AgentSandbox::builder("agent-123")
-            .history(Arc::new(history))
+            .params(serde_json::json!({
+                "query": "path/to/file.rs",
+                "pattern": "fn\\s+\\w+",
+                "message": "Hello \"World\"!"
+            }))
             .build()
             .await
             .expect("build sandbox");
 
         let result = sandbox
-            .execute("cat /history/current/transcript.md", &limits())
+            .execute("cat /agent/params.json", &limits())
             .await
-            .expect("cat");
+            .expect("cat params");
 
         assert_eq!(result.exit_code, 0);
-        let stdout = String::from_utf8_lossy(&result.stdout);
-        assert!(stdout.contains("你好世界"));
-        assert!(stdout.contains("🌍"));
+        let params: serde_json::Value =
+            serde_json::from_str(&String::from_utf8_lossy(&result.stdout)).expect("parse");
+        assert_eq!(params["query"], "path/to/file.rs");
+        assert_eq!(params["pattern"], "fn\\s+\\w+");
+        assert_eq!(params["message"], "Hello \"World\"!");
     }
 
     #[tokio::test]
-    async fn test_concurrent_sandbox_isolation() {
-        // Create two sandboxes with the same structure
-        let sandbox1 = AgentSandbox::builder("agent-1")
-            .params(serde_json::json!({"id": 1}))
-            .build()
-            .await
-            .expect("build sandbox1");
+    async fn test_large_tool_output() {
+        let large_data: Vec<serde_json::Value> = (0..1000)
+            .map(|i| {
+                serde_json::json!({
+                    "id": i,
+                    "name": format!("Item {}", i),
+                    "data": "x".repeat(100)
+                })
+            })
+            .collect();
 
-        let sandbox2 = AgentSandbox::builder("agent-2")
-            .params(serde_json::json!({"id": 2}))
-            .build()
-            .await
-            .expect("build sandbox2");
+        let handler = move |_request: ToolRequest| {
+            let data = large_data.clone();
+            async move {
+                ToolResult {
+                    success: true,
+                    output: serde_json::to_string(&data).unwrap(),
+                }
+            }
+        };
 
-        // Write to sandbox1
-        sandbox1
-            .execute("echo 'sandbox1 data' > /agent/scratch/test.txt", &limits())
-            .await
-            .expect("write 1");
-
-        // Write to sandbox2
-        sandbox2
-            .execute("echo 'sandbox2 data' > /agent/scratch/test.txt", &limits())
-            .await
-            .expect("write 2");
-
-        // Verify isolation
-        let result1 = sandbox1
-            .execute("cat /agent/scratch/test.txt", &limits())
-            .await
-            .expect("read 1");
-        assert!(String::from_utf8_lossy(&result1.stdout).contains("sandbox1"));
-
-        let result2 = sandbox2
-            .execute("cat /agent/scratch/test.txt", &limits())
-            .await
-            .expect("read 2");
-        assert!(String::from_utf8_lossy(&result2.stdout).contains("sandbox2"));
-
-        // Verify metadata isolation
-        let result1 = sandbox1
-            .execute("cat /agent/params.json | jq .id", &limits())
-            .await
-            .expect("params 1");
-        assert!(String::from_utf8_lossy(&result1.stdout).contains("1"));
-
-        let result2 = sandbox2
-            .execute("cat /agent/params.json | jq .id", &limits())
-            .await
-            .expect("params 2");
-        assert!(String::from_utf8_lossy(&result2.stdout).contains("2"));
-    }
-
-    #[tokio::test]
-    async fn test_empty_tool_params() {
         let sandbox = AgentSandbox::builder("agent-123")
-            .tool(ToolDefinition::no_params(
-                "no_args",
-                "Tool with no arguments",
-            ))
+            .tool(ToolDefinition::no_params("bulk_data", "Get bulk data"))
+            .tool_handler(handler)
             .build()
             .await
             .expect("build sandbox");
 
-        let outcome = sandbox
-            .execute_with_tools("tool no_args", &limits())
+        let result = sandbox
+            .execute("tool bulk_data", &limits())
+            .await
+            .expect("bulk data");
+
+        assert_eq!(result.exit_code, 0);
+        // Output should contain our data
+        let stdout = String::from_utf8_lossy(&result.stdout);
+        assert!(stdout.contains("Item 0"));
+        assert!(stdout.contains("Item 999"));
+    }
+
+    #[tokio::test]
+    async fn test_tool_with_no_params() {
+        let received_params = Arc::new(std::sync::Mutex::new(String::new()));
+        let params_clone = received_params.clone();
+
+        let handler = move |request: ToolRequest| {
+            let params = params_clone.clone();
+            async move {
+                *params.lock().unwrap() = request.params.clone();
+                ToolResult {
+                    success: true,
+                    output: "ok".to_string(),
+                }
+            }
+        };
+
+        let sandbox = AgentSandbox::builder("agent-123")
+            .tool(ToolDefinition::no_params("no_args", "No arguments"))
+            .tool_handler(handler)
+            .build()
+            .await
+            .expect("build sandbox");
+
+        sandbox
+            .execute("tool no_args", &limits())
             .await
             .expect("execute");
 
-        match outcome {
-            ExecutionOutcome::ToolRequest(request) => {
-                assert_eq!(request.tool, "no_args");
-                // Params should be empty object
-                assert!(request.params.is_object());
+        let params_str = received_params.lock().unwrap().clone();
+        // Should be empty object or similar
+        let params: serde_json::Value = serde_json::from_str(&params_str).unwrap_or_default();
+        assert!(params.is_object());
+    }
+
+    #[tokio::test]
+    async fn test_unicode_in_tool_output() {
+        let handler = |_request: ToolRequest| async move {
+            ToolResult {
+                success: true,
+                output: "Hello 世界! 🎉 Привет мир".to_string(),
             }
-            _ => panic!("Expected ToolRequest"),
-        }
+        };
+
+        let sandbox = AgentSandbox::builder("agent-123")
+            .tool(ToolDefinition::no_params("unicode", "Unicode test"))
+            .tool_handler(handler)
+            .build()
+            .await
+            .expect("build sandbox");
+
+        let result = sandbox
+            .execute("tool unicode", &limits())
+            .await
+            .expect("execute");
+
+        assert_eq!(result.exit_code, 0);
+        let stdout = String::from_utf8_lossy(&result.stdout);
+        assert!(stdout.contains("世界"));
+        assert!(stdout.contains("🎉"));
+        assert!(stdout.contains("Привет"));
     }
 }

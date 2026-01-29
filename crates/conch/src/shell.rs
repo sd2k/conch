@@ -35,7 +35,7 @@ use eryx_vfs::{
     VfsStorage,
 };
 
-use crate::executor::ComponentShellExecutor;
+use crate::executor::{ComponentShellExecutor, ToolHandler};
 use crate::limits::ResourceLimits;
 use crate::runtime::{ExecutionResult, RuntimeError};
 
@@ -178,6 +178,9 @@ struct RealMount {
 ///     .mount("/project", "/home/user/code", Mount::readonly())
 ///     .mount("/output", "/tmp/agent-output", Mount::readwrite())
 ///     .vfs_path("/data", DirPerms::READ, FilePerms::READ)
+///     .tool_handler(|req| async move {
+///         ToolResult { success: true, output: format!("Called: {}", req.tool) }
+///     })
 ///     .build()?;
 /// ```
 pub struct ShellBuilder {
@@ -185,6 +188,7 @@ pub struct ShellBuilder {
     vfs_mounts: Vec<VfsMount>,
     real_mounts: Vec<RealMount>,
     executor: Option<ComponentShellExecutor>,
+    tool_handler: Option<Arc<dyn ToolHandler>>,
 }
 
 impl std::fmt::Debug for ShellBuilder {
@@ -194,6 +198,7 @@ impl std::fmt::Debug for ShellBuilder {
             .field("vfs_mounts", &self.vfs_mounts)
             .field("real_mounts", &self.real_mounts)
             .field("has_executor", &self.executor.is_some())
+            .field("has_tool_handler", &self.tool_handler.is_some())
             .finish()
     }
 }
@@ -214,6 +219,7 @@ impl ShellBuilder {
             vfs_mounts: Vec::new(),
             real_mounts: Vec::new(),
             executor: None,
+            tool_handler: None,
         }
     }
 
@@ -272,6 +278,36 @@ impl ShellBuilder {
         self
     }
 
+    /// Set a tool handler for processing tool invocations from shell scripts.
+    ///
+    /// When a script runs `tool <name> --param value`, the handler will be called
+    /// to execute the tool asynchronously.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use conch::{Shell, ToolRequest, ToolResult};
+    ///
+    /// let shell = Shell::builder()
+    ///     .tool_handler(|req: ToolRequest| async move {
+    ///         match req.tool.as_str() {
+    ///             "echo" => ToolResult {
+    ///                 success: true,
+    ///                 output: req.params.clone(),
+    ///             },
+    ///             _ => ToolResult {
+    ///                 success: false,
+    ///                 output: format!("Unknown tool: {}", req.tool),
+    ///             },
+    ///         }
+    ///     })
+    ///     .build()?;
+    /// ```
+    pub fn tool_handler(mut self, handler: impl ToolHandler + 'static) -> Self {
+        self.tool_handler = Some(Arc::new(handler));
+        self
+    }
+
     /// Build the shell with the configured settings.
     ///
     /// # Errors
@@ -325,6 +361,7 @@ impl ShellBuilder {
             vfs,
             vfs_mounts,
             real_mounts: self.real_mounts,
+            tool_handler: self.tool_handler,
         })
     }
 }
@@ -353,6 +390,7 @@ pub struct Shell {
     vfs: DynVfsStorage,
     vfs_mounts: Vec<VfsMount>,
     real_mounts: Vec<RealMount>,
+    tool_handler: Option<Arc<dyn ToolHandler>>,
 }
 
 impl std::fmt::Debug for Shell {
@@ -426,9 +464,9 @@ impl Shell {
             hybrid_ctx.add_real_preopen(&mount.guest_path, real_dir);
         }
 
-        // Execute with hybrid VFS
+        // Execute with hybrid VFS and optional tool handler
         self.executor
-            .execute_with_hybrid_vfs(script, limits, hybrid_ctx)
+            .execute_with_hybrid_vfs(script, limits, hybrid_ctx, self.tool_handler.clone())
             .await
     }
 }

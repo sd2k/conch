@@ -8,10 +8,8 @@
 use std::sync::Arc;
 
 use conch::ResourceLimits;
-use conch::agent::{
-    AgentSandbox, ConversationMetadata, ExecutionOutcome, SimpleHistoryProvider, ToolDefinition,
-    ToolResult,
-};
+use conch::agent::{AgentSandbox, ConversationMetadata, SimpleHistoryProvider, ToolDefinition};
+use conch::{ToolRequest, ToolResult};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -33,6 +31,51 @@ A> I'll check the Cargo.toml file for you."#,
             assistant_message_count: 1,
             tool_call_count: 0,
         });
+
+    // Create a tool handler that will be called when the agent invokes tools
+    // Note: request.params is a JSON string that needs to be parsed
+    let tool_handler = |request: ToolRequest| async move {
+        println!("  [Tool Handler] Received request for: {}", request.tool);
+        println!("  [Tool Handler] Params: {}", request.params);
+
+        // Parse params JSON string
+        let params: serde_json::Value = serde_json::from_str(&request.params).unwrap_or_default();
+
+        match request.tool.as_str() {
+            "file_read" => {
+                let path = params["path"].as_str().unwrap_or("unknown");
+                println!("  [Tool Handler] Simulating file read for: {}", path);
+                ToolResult {
+                    success: true,
+                    output: serde_json::to_string(&serde_json::json!({
+                        "content": "[package]\nname = \"my-project\"\nversion = \"0.1.0\"\n\n[dependencies]\nserde = \"1.0\"\ntokio = { version = \"1.0\", features = [\"full\"] }",
+                        "path": path,
+                        "size": 142
+                    })).unwrap(),
+                }
+            }
+            "dependency_check" => ToolResult {
+                success: true,
+                output: serde_json::to_string(&serde_json::json!({
+                    "outdated": [],
+                    "vulnerable": [],
+                    "total": 2
+                }))
+                .unwrap(),
+            },
+            "list_files" => ToolResult {
+                success: true,
+                output: serde_json::to_string(&serde_json::json!({
+                    "files": ["Cargo.toml", "src/main.rs", "README.md"]
+                }))
+                .unwrap(),
+            },
+            _ => ToolResult {
+                success: false,
+                output: format!("Unknown tool: {}", request.tool),
+            },
+        }
+    };
 
     // Build an agent sandbox with tools and configuration
     let sandbox = AgentSandbox::builder("analyst-001")
@@ -79,6 +122,8 @@ A> I'll check the Cargo.toml file for you."#,
         ))
         // Attach conversation history
         .history(Arc::new(history))
+        // Set up tool handler callback
+        .tool_handler(tool_handler)
         .build()
         .await?;
 
@@ -120,57 +165,14 @@ A> I'll check the Cargo.toml file for you."#,
     println!("{}", String::from_utf8_lossy(&result.stdout));
 
     // === Invoke a Tool ===
+    // With the callback-based approach, tool execution happens inline during script execution
     println!("\n--- Invoking file_read Tool ---");
-    let outcome = sandbox
-        .execute_with_tools("tool file_read --path Cargo.toml", &limits)
+    let result = sandbox
+        .execute("tool file_read --path Cargo.toml", &limits)
         .await?;
 
-    match outcome {
-        ExecutionOutcome::ToolRequest(request) => {
-            println!("Tool request received:");
-            println!("  Call ID: {}", request.call_id);
-            println!("  Tool: {}", request.tool);
-            println!("  Params: {}", request.params);
-
-            // Simulate orchestrator executing the tool
-            println!("\n--- Simulating Tool Execution ---");
-            let tool_result = serde_json::json!({
-                "content": "[package]\nname = \"my-project\"\nversion = \"0.1.0\"\n\n[dependencies]\nserde = \"1.0\"\ntokio = { version = \"1.0\", features = [\"full\"] }",
-                "path": "Cargo.toml",
-                "size": 142
-            });
-
-            // Write result back to sandbox
-            sandbox
-                .write_tool_result(&request.call_id, ToolResult::success(tool_result))
-                .await?;
-            println!("Tool result written to VFS");
-
-            // === Agent Reads Result ===
-            println!("\n--- Agent Reading Tool Result ---");
-            let result = sandbox
-                .execute("cat /tools/last_result.json", &limits)
-                .await?;
-            println!("{}", String::from_utf8_lossy(&result.stdout));
-
-            // === Check Tool History ===
-            println!("\n--- Tool History ---");
-            let result = sandbox
-                .execute(
-                    &format!("cat /tools/history/{}/metadata.json", request.call_id),
-                    &limits,
-                )
-                .await?;
-            println!("{}", String::from_utf8_lossy(&result.stdout));
-        }
-        ExecutionOutcome::Completed(result) => {
-            println!(
-                "Unexpected completion (exit {}): {}",
-                result.exit_code,
-                String::from_utf8_lossy(&result.stdout)
-            );
-        }
-    }
+    println!("Tool result (exit code {}):", result.exit_code);
+    println!("{}", String::from_utf8_lossy(&result.stdout));
 
     // === Write to Scratch Space ===
     println!("\n--- Writing Analysis to Scratch ---");

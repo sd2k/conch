@@ -44,6 +44,9 @@ pub use shell::{Mount, Shell, ShellBuilder};
 // Executor (for advanced usage)
 pub use executor::ComponentShellExecutor;
 
+// Tool handler types (for tool invocation from shell scripts)
+pub use executor::{ToolHandler, ToolRequest, ToolResult};
+
 // Resource limits
 pub use limits::ResourceLimits;
 

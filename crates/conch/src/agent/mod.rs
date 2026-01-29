@@ -55,10 +55,7 @@ mod sandbox;
 mod tools;
 mod vfs;
 
-pub use continuation::{
-    ExecutionOutcome, TOOL_REQUEST_EXIT_CODE, ToolRequest, ToolResult, find_pending_request,
-    parse_pending_request, write_tool_result,
-};
+pub use continuation::{ToolRequest, ToolResult, write_tool_history};
 pub use history::{
     ConversationMetadata, ConversationSummary, HistoryProvider, SimpleHistoryProvider,
     format_assistant_message, format_tool_call, format_tool_result, format_user_message,
