@@ -103,12 +103,11 @@ describe("tool builtin", () => {
     expect(calls).toEqual(["first_tool", "second_tool", "third_tool"]);
   });
 
-  // TODO: Command substitution causes tokio runtime issues in WASM
-  // it("returns tool output to shell", () => {
-  //   setToolHandler((request) => {
-  //     return { success: true, output: "tool result: success!" };
-  //   });
-  //   const exitCode = execute('result=$(tool test_tool); echo "Got: $result"');
-  //   expect(exitCode).toBe(0);
-  // });
+  it("returns tool output to shell via command substitution", () => {
+    setToolHandler(() => {
+      return { success: true, output: "tool result: success!" };
+    });
+    const exitCode = execute('result=$(tool test_tool); echo "Got: $result"');
+    expect(exitCode).toBe(0);
+  });
 });
