@@ -8,6 +8,8 @@
 import { describe, expect, it } from "vitest";
 
 import { execute } from "@bsull/conch";
+// Initialize stdin with empty handler to prevent crashes when reading stdin
+import "@bsull/conch/stdin";
 
 describe("tool builtin", () => {
   // The tool builtin exits with code 42 to signal a tool request
@@ -33,5 +35,11 @@ describe("tool builtin", () => {
   it("fails with option as tool name", () => {
     const exitCode = execute("tool --query test");
     expect(exitCode).toBe(1);
+  });
+
+  it("receives piped stdin data", () => {
+    // When data is piped to tool, it should be included in the request
+    const exitCode = execute('echo "input data" | tool analyze --format json');
+    expect(exitCode).toBe(TOOL_REQUEST_EXIT_CODE);
   });
 });
