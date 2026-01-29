@@ -25,6 +25,10 @@
     "./vfs": {
       "types": "./vfs.d.ts",
       "default": "./vfs.js"
+    },
+    "./stdin": {
+      "types": "./stdin.d.ts",
+      "default": "./stdin.js"
     }
   },
   "keywords": [
