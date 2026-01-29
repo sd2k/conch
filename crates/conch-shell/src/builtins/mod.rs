@@ -16,8 +16,7 @@ pub use grep::GrepCommand;
 pub use head::HeadCommand;
 pub use jq::JqCommand;
 pub use tail::TailCommand;
-#[allow(unused_imports)] // TOOL_REQUEST_EXIT_CODE used in Session 5
-pub use tool::{TOOL_REQUEST_EXIT_CODE, ToolCommand};
+pub use tool::ToolCommand;
 pub use wc::WcCommand;
 
 use std::collections::HashMap;

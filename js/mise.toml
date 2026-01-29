@@ -16,10 +16,11 @@ sources = ["../target/wasm32-wasip2/release/conch_shell.wasm"]
 outputs = ["conch-shell/conch-shell.js", "conch-shell/conch-shell.core.wasm"]
 run = """
 jco transpile \
+  ../target/wasm32-wasip2/release/conch_shell.wasm \
   --name conch-shell \
   --optimize \
   --out-dir conch-shell \
-  ../target/wasm32-wasip2/release/conch_shell.wasm
+  --map invoke-tool=./tool-handler.js
 jco types \
   --name conch-shell \
   --out-dir conch-shell \
