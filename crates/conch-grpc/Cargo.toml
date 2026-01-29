@@ -1,0 +1,36 @@
+[package]
+name = "conch-grpc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "gRPC server for Conch sandboxed shell execution"
+
+[[bin]]
+name = "conch-grpc"
+path = "src/main.rs"
+
+[dependencies]
+conch = { workspace = true, features = ["embedded-shell"] }
+eryx-vfs.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "signal"] }
+tokio-stream = "0.1"
+tonic = "0.12"
+prost = "0.13"
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+anyhow.workspace = true
+serde_json.workspace = true
+async-trait.workspace = true
+clap = { version = "4", features = ["derive"] }
+
+[build-dependencies]
+tonic-build = "0.12"
+
+[dev-dependencies]
+tempfile = "3"
+tokio-test = "0.4"
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+
+[lints]
+workspace = true
