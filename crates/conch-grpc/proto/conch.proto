@@ -1,0 +1,301 @@
+syntax = "proto3";
+
+package conch.v1;
+
+service Sandbox {
+  // Execute a script with bidirectional streaming for VFS and tool callbacks.
+  //
+  // The client sends an ExecuteRequest first, then responds to VFS and tool
+  // requests from the server. The server streams back VFS requests, tool
+  // requests, output, and finally a completion or error message.
+  rpc Execute(stream ClientMessage) returns (stream ServerMessage);
+}
+
+// ============================================================================
+// Client -> Server Messages
+// ============================================================================
+
+message ClientMessage {
+  oneof msg {
+    // Initial request to start execution
+    ExecuteRequest execute = 1;
+
+    // VFS responses
+    VfsReadResponse vfs_read_response = 10;
+    VfsWriteResponse vfs_write_response = 11;
+    VfsStatResponse vfs_stat_response = 12;
+    VfsListResponse vfs_list_response = 13;
+    VfsDeleteResponse vfs_delete_response = 14;
+    VfsMkdirResponse vfs_mkdir_response = 15;
+    VfsRenameResponse vfs_rename_response = 16;
+
+    // Tool response (orchestrator executed the external tool)
+    ToolResponse tool_response = 20;
+  }
+}
+
+message ExecuteRequest {
+  // Unique agent identifier - used to namespace VFS state in the client
+  string agent_id = 1;
+
+  // The shell script to execute
+  string script = 2;
+
+  // Resource limits
+  ResourceLimits limits = 3;
+
+  // Optional: agent metadata to write to /agent/metadata.json
+  AgentMetadata metadata = 4;
+
+  // Optional: tools available to this agent (written to /tools/)
+  repeated ToolDefinition tools = 5;
+}
+
+message ResourceLimits {
+  // Maximum CPU time in milliseconds (default: 5000 = 5 seconds)
+  uint64 max_cpu_ms = 1;
+  // Maximum memory in bytes (default: 67108864 = 64MB)
+  uint64 max_memory_bytes = 2;
+  // Maximum output in bytes (default: 1048576 = 1MB)
+  uint64 max_output_bytes = 3;
+  // Wall-clock timeout in milliseconds (default: 30000 = 30 seconds)
+  uint64 timeout_ms = 4;
+}
+
+message AgentMetadata {
+  // Agent display name
+  string name = 1;
+  // Capabilities granted to this agent
+  repeated string capabilities = 2;
+  // Arbitrary JSON to write to /agent/params.json
+  string params_json = 3;
+}
+
+message ToolDefinition {
+  // Tool name (e.g., "web_search", "edit_file")
+  string name = 1;
+  // Human-readable description
+  string description = 2;
+  // JSON Schema for parameters
+  string parameters_schema_json = 3;
+}
+
+// ============================================================================
+// Server -> Client Messages
+// ============================================================================
+
+message ServerMessage {
+  oneof msg {
+    // VFS operation requests
+    VfsReadRequest vfs_read = 10;
+    VfsWriteRequest vfs_write = 11;
+    VfsStatRequest vfs_stat = 12;
+    VfsListRequest vfs_list = 13;
+    VfsDeleteRequest vfs_delete = 14;
+    VfsMkdirRequest vfs_mkdir = 15;
+    VfsRenameRequest vfs_rename = 16;
+
+    // Tool invocation (script called `tool` builtin)
+    ToolRequest tool_request = 20;
+
+    // Real-time output
+    Output output = 30;
+
+    // Terminal states
+    Completed completed = 40;
+    Error error = 41;
+  }
+}
+
+// ============================================================================
+// VFS Operations
+// ============================================================================
+
+message VfsReadRequest {
+  uint64 request_id = 1;
+  string path = 2;
+}
+
+message VfsReadResponse {
+  uint64 request_id = 1;
+  oneof result {
+    bytes data = 2;
+    VfsError error = 3;
+  }
+}
+
+message VfsWriteRequest {
+  uint64 request_id = 1;
+  string path = 2;
+  bytes data = 3;
+}
+
+message VfsWriteResponse {
+  uint64 request_id = 1;
+  oneof result {
+    Empty ok = 2;
+    VfsError error = 3;
+  }
+}
+
+message VfsStatRequest {
+  uint64 request_id = 1;
+  string path = 2;
+}
+
+message VfsStatResponse {
+  uint64 request_id = 1;
+  oneof result {
+    FileStat stat = 2;
+    VfsError error = 3;
+  }
+}
+
+message FileStat {
+  FileType file_type = 1;
+  uint64 size = 2;
+}
+
+enum FileType {
+  FILE_TYPE_UNSPECIFIED = 0;
+  FILE_TYPE_FILE = 1;
+  FILE_TYPE_DIRECTORY = 2;
+}
+
+message VfsListRequest {
+  uint64 request_id = 1;
+  string path = 2;
+}
+
+message VfsListResponse {
+  uint64 request_id = 1;
+  oneof result {
+    DirEntries entries = 2;
+    VfsError error = 3;
+  }
+}
+
+message DirEntries {
+  repeated DirEntry entries = 1;
+}
+
+message DirEntry {
+  string name = 1;
+  FileType file_type = 2;
+}
+
+message VfsDeleteRequest {
+  uint64 request_id = 1;
+  string path = 2;
+}
+
+message VfsDeleteResponse {
+  uint64 request_id = 1;
+  oneof result {
+    Empty ok = 2;
+    VfsError error = 3;
+  }
+}
+
+message VfsMkdirRequest {
+  uint64 request_id = 1;
+  string path = 2;
+}
+
+message VfsMkdirResponse {
+  uint64 request_id = 1;
+  oneof result {
+    Empty ok = 2;
+    VfsError error = 3;
+  }
+}
+
+message VfsRenameRequest {
+  uint64 request_id = 1;
+  string from_path = 2;
+  string to_path = 3;
+}
+
+message VfsRenameResponse {
+  uint64 request_id = 1;
+  oneof result {
+    Empty ok = 2;
+    VfsError error = 3;
+  }
+}
+
+message VfsError {
+  VfsErrorCode code = 1;
+  string message = 2;
+}
+
+enum VfsErrorCode {
+  VFS_ERROR_CODE_UNSPECIFIED = 0;
+  VFS_ERROR_CODE_NOT_FOUND = 1;
+  VFS_ERROR_CODE_PERMISSION_DENIED = 2;
+  VFS_ERROR_CODE_ALREADY_EXISTS = 3;
+  VFS_ERROR_CODE_NOT_A_DIRECTORY = 4;
+  VFS_ERROR_CODE_NOT_A_FILE = 5;
+  VFS_ERROR_CODE_IO_ERROR = 6;
+}
+
+message Empty {}
+
+// ============================================================================
+// Tool Execution
+// ============================================================================
+
+message ToolRequest {
+  // Unique ID for this tool call (for correlation)
+  string call_id = 1;
+  // Tool name
+  string tool = 2;
+  // Tool parameters as JSON
+  string params_json = 3;
+  // Optional stdin data piped to the tool
+  bytes stdin = 4;
+}
+
+message ToolResponse {
+  // Must match the call_id from ToolRequest
+  string call_id = 1;
+  oneof result {
+    // Successful result as JSON
+    string result_json = 2;
+    // Error message
+    string error = 3;
+  }
+}
+
+// ============================================================================
+// Output and Completion
+// ============================================================================
+
+message Output {
+  OutputStream stream = 1;
+  bytes data = 2;
+}
+
+enum OutputStream {
+  OUTPUT_STREAM_UNSPECIFIED = 0;
+  OUTPUT_STREAM_STDOUT = 1;
+  OUTPUT_STREAM_STDERR = 2;
+}
+
+message Completed {
+  int32 exit_code = 1;
+  bool truncated = 2;
+  ExecutionStats stats = 3;
+}
+
+message ExecutionStats {
+  uint64 cpu_time_ms = 1;
+  uint64 wall_time_ms = 2;
+  uint64 memory_bytes = 3;
+}
+
+message Error {
+  string message = 1;
+  // Hint: was this a transient error that might succeed on retry?
+  bool retryable = 2;
+}
