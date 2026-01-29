@@ -1,11 +1,9 @@
 /**
  * Tool builtin tests
  *
- * These tests are currently excluded from the test run due to Rust-side issues:
- * 1. "Cannot start a runtime from within a runtime" - stdin reading uses block_on
- * 2. Stdin returns undefined when nothing is piped, causing byteLength error
- *
- * To run these tests manually: npx vitest run tool.test.ts --config vitest.tool.config.ts
+ * The tool builtin allows agents to invoke external tools from the shell.
+ * It outputs a JSON request to stdout and exits with code 42 to signal
+ * the orchestrator to execute the tool.
  */
 import { describe, expect, it } from "vitest";
 

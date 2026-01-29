@@ -20,8 +20,7 @@ export default defineConfig({
     sequence: {
       shuffle: false,
     },
-    // Exclude tool builtin tests until Rust-side stdin issues are fixed
-    exclude: ["**/tool.test.ts", "**/node_modules/**"],
+    exclude: ["**/node_modules/**"],
   },
   resolve: {
     alias: {
