@@ -7,7 +7,7 @@
 //! # Syntax
 //!
 //! ```bash
-//! tool <name> [--param value]... [--json '{"key": "value"}'] [--stdin]
+//! tool <name> [--param value]... [--json '{"key": "value"}']
 //! ```
 //!
 //! # Examples
@@ -19,8 +19,8 @@
 //! # With JSON parameters
 //! tool code_edit --json '{"file": "src/main.rs", "instruction": "add error handling"}'
 //!
-//! # Piping data to a tool (must use --stdin flag)
-//! cat /workspace/data.json | tool analyze_data --format json --stdin
+//! # Piping data to a tool
+//! cat /workspace/data.json | tool analyze_data --format json
 //! ```
 //!
 //! # Output
@@ -51,8 +51,6 @@ struct ToolRequest {
     params: serde_json::Value,
     /// Stdin data piped to the tool (if any).
     stdin: Option<Vec<u8>>,
-    /// Whether to read from stdin.
-    read_stdin: bool,
 }
 
 impl builtins::SimpleCommand for ToolCommand {
@@ -64,14 +62,13 @@ impl builtins::SimpleCommand for ToolCommand {
         match content_type {
             builtins::ContentType::DetailedHelp => {
                 Ok("Invoke an external tool from the sandbox.\n\n\
-                 Usage: tool <name> [--param value]... [--json '{...}'] [--stdin]\n\n\
+                 Usage: tool <name> [--param value]... [--json '{...}']\n\n\
                  The tool command requests execution of an external tool by the orchestrator.\n\
-                 Parameters can be passed as --key value pairs or as a JSON object with --json.\n\
-                 Use --stdin to read piped input data.\n\n\
+                 Parameters can be passed as --key value pairs or as a JSON object with --json.\n\n\
                  Examples:\n\
                    tool web_search --query \"rust async\"\n\
                    tool code_edit --json '{\"file\": \"main.rs\", \"instruction\": \"fix bug\"}'\n\
-                   cat data.json | tool analyze --format json --stdin"
+                   cat data.json | tool analyze --format json"
                     .into())
             }
             builtins::ContentType::ShortUsage => {
@@ -97,24 +94,23 @@ impl builtins::SimpleCommand for ToolCommand {
             }
         };
 
-        // Only read stdin if explicitly requested with --stdin flag
-        let stdin_data = if request.read_stdin {
+        // Check if there's stdin data
+        let stdin_data = {
             let mut stdin = context.stdin();
             let mut buf = Vec::new();
+            // Only read stdin if it's not a TTY (i.e., something is piped)
+            // In WASM, we can try to read and check if we get data
             match stdin.read_to_end(&mut buf) {
                 Ok(0) => None,
                 Ok(_) => Some(buf),
                 Err(_) => None,
             }
-        } else {
-            None
         };
 
         let request = ToolRequest {
             tool: request.tool,
             params: request.params,
             stdin: stdin_data,
-            read_stdin: request.read_stdin,
         };
 
         // Output the request as JSON to stdout
@@ -147,7 +143,6 @@ fn parse_tool_args(args: &[String]) -> Result<ToolRequest, String> {
 
     let mut params: HashMap<String, serde_json::Value> = HashMap::new();
     let mut json_params: Option<serde_json::Value> = None;
-    let mut read_stdin = false;
 
     while let Some(arg) = iter.next() {
         if arg == "--json" {
@@ -164,9 +159,6 @@ fn parse_tool_args(args: &[String]) -> Result<ToolRequest, String> {
             }
 
             json_params = Some(parsed);
-        } else if arg == "--stdin" {
-            // Flag to read from stdin
-            read_stdin = true;
         } else if let Some(key) = arg.strip_prefix("--") {
             // --key value pair
             if key.is_empty() {
@@ -201,7 +193,6 @@ fn parse_tool_args(args: &[String]) -> Result<ToolRequest, String> {
         tool,
         params: final_params,
         stdin: None, // Filled in later
-        read_stdin,
     })
 }
 
@@ -246,34 +237,6 @@ mod tests {
         let req = parse_tool_args(&args).expect("parse failed");
         assert_eq!(req.tool, "web_search");
         assert!(req.params.as_object().map_or(false, |o| o.is_empty()));
-        assert!(!req.read_stdin);
-    }
-
-    #[test]
-    fn test_parse_with_stdin_flag() {
-        let args = vec![
-            "tool".to_string(),
-            "analyze".to_string(),
-            "--stdin".to_string(),
-        ];
-        let req = parse_tool_args(&args).expect("parse failed");
-        assert_eq!(req.tool, "analyze");
-        assert!(req.read_stdin);
-    }
-
-    #[test]
-    fn test_parse_stdin_with_params() {
-        let args = vec![
-            "tool".to_string(),
-            "analyze".to_string(),
-            "--format".to_string(),
-            "json".to_string(),
-            "--stdin".to_string(),
-        ];
-        let req = parse_tool_args(&args).expect("parse failed");
-        assert_eq!(req.tool, "analyze");
-        assert_eq!(req.params["format"], "json");
-        assert!(req.read_stdin);
     }
 
     #[test]
@@ -397,7 +360,6 @@ mod tests {
             tool: "test".to_string(),
             params: serde_json::json!({"key": "value"}),
             stdin: None,
-            read_stdin: false,
         };
         let json = build_request_json(&req);
         assert!(json.contains("\"tool\": \"test\""));
@@ -410,7 +372,6 @@ mod tests {
             tool: "test".to_string(),
             params: serde_json::json!({}),
             stdin: Some(b"hello world".to_vec()),
-            read_stdin: true,
         };
         let json = build_request_json(&req);
         assert!(json.contains("\"stdin\": \"hello world\""));
