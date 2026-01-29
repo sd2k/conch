@@ -1,3 +1,9 @@
+# Enable monorepo mode for subdirectory tasks
+experimental_monorepo_root = true
+
+[monorepo]
+config_roots = ["js"]
+
 [tools]
 rust = "1.92"
 
@@ -55,6 +61,8 @@ run = "rustup target add wasm32-wasip2"
 [tasks.wasm-build]
 description = "Build WASM shell component (wasip2)"
 depends = ["wasm-target"]
+sources = ["crates/conch-shell/src/**/*.rs", "crates/conch-shell/Cargo.toml", "crates/conch-shell/wit/**/*.wit"]
+outputs = ["target/wasm32-wasip2/release/conch_shell.wasm"]
 run = "cargo build -p conch-shell --target wasm32-wasip2 --release"
 
 [tasks.build-embedded]

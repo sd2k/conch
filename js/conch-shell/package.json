@@ -1,0 +1,41 @@
+{
+  "name": "@bsull/conch",
+  "type": "module",
+  "description": "A sandboxed bash-compatible shell running in WebAssembly, for browser and Node.js",
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bsull/conch.git"
+  },
+  "files": [
+    "interfaces/*",
+    "*.wasm",
+    "*.js",
+    "*.d.ts",
+    "README.md"
+  ],
+  "main": "conch-shell.js",
+  "types": "conch-shell.d.ts",
+  "exports": {
+    ".": {
+      "types": "./conch-shell.d.ts",
+      "default": "./conch-shell.js"
+    },
+    "./vfs": {
+      "types": "./vfs.d.ts",
+      "default": "./vfs.js"
+    }
+  },
+  "keywords": [
+    "shell",
+    "bash",
+    "wasm",
+    "webassembly",
+    "sandbox",
+    "component-model"
+  ],
+  "dependencies": {
+    "@bytecodealliance/preview2-shim": "^0.17.0"
+  }
+}
