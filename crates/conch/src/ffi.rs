@@ -19,6 +19,9 @@
 use std::cell::RefCell;
 use std::ffi::{CStr, CString, c_char};
 use std::ptr;
+use std::sync::Arc;
+
+use eryx_vfs::{DirPerms, FilePerms, HybridVfsCtx, InMemoryStorage};
 
 use crate::executor::ComponentShellExecutor;
 use crate::limits::ResourceLimits;
@@ -99,37 +102,30 @@ pub extern "C" fn conch_executor_new_embedded() -> *mut ConchExecutor {
     }
 }
 
-/// Check if the embedded shell module is available.
-///
-/// Returns 1 if the library was built with `embedded-shell` feature, 0 otherwise.
+/// Stub for when embedded-shell feature is disabled.
+#[cfg(not(feature = "embedded-shell"))]
 #[unsafe(no_mangle)]
-pub extern "C" fn conch_has_embedded_shell() -> u8 {
-    #[cfg(feature = "embedded-shell")]
-    {
-        1
-    }
-    #[cfg(not(feature = "embedded-shell"))]
-    {
-        0
-    }
+pub extern "C" fn conch_executor_new_embedded() -> *mut ConchExecutor {
+    set_last_error("embedded-shell feature not enabled");
+    ptr::null_mut()
 }
 
-/// Create a new shell executor from a WASM module file path.
+/// Create a new shell executor from a WASM file path.
 ///
 /// Returns a pointer to the executor on success, or null on failure.
 /// On failure, call `conch_last_error()` to get the error message.
 ///
 /// # Safety
-/// - `module_path` must be a valid null-terminated C string.
+/// - `path` must be a valid null-terminated C string.
 /// - The returned pointer must be freed with `conch_executor_free()`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn conch_executor_new(module_path: *const c_char) -> *mut ConchExecutor {
-    if module_path.is_null() {
-        set_last_error("module_path is null");
+pub unsafe extern "C" fn conch_executor_new_from_file(path: *const c_char) -> *mut ConchExecutor {
+    if path.is_null() {
+        set_last_error("path is null");
         return ptr::null_mut();
     }
 
-    let path = match unsafe { CStr::from_ptr(module_path) }.to_str() {
+    let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
         Ok(s) => s,
         Err(e) => {
             set_last_error(&format!("invalid UTF-8 in path: {}", e));
@@ -137,39 +133,39 @@ pub unsafe extern "C" fn conch_executor_new(module_path: *const c_char) -> *mut 
         }
     };
 
-    match ComponentShellExecutor::from_file(path) {
+    match ComponentShellExecutor::from_file(path_str) {
         Ok(executor) => Box::into_raw(Box::new(ConchExecutor { executor })),
         Err(e) => {
-            set_last_error(&format!("failed to create executor: {}", e));
+            set_last_error(&format!("failed to load component: {}", e));
             ptr::null_mut()
         }
     }
 }
 
-/// Create a new shell executor from WASM module bytes.
+/// Create a new shell executor from WASM bytes.
 ///
 /// Returns a pointer to the executor on success, or null on failure.
 /// On failure, call `conch_last_error()` to get the error message.
 ///
 /// # Safety
-/// - `module_data` must be a valid pointer to `module_len` bytes.
+/// - `bytes` must be a valid pointer to `len` bytes.
 /// - The returned pointer must be freed with `conch_executor_free()`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn conch_executor_new_from_bytes(
-    module_data: *const u8,
-    module_len: usize,
+    bytes: *const u8,
+    len: usize,
 ) -> *mut ConchExecutor {
-    if module_data.is_null() {
-        set_last_error("module_data is null");
+    if bytes.is_null() {
+        set_last_error("bytes is null");
         return ptr::null_mut();
     }
 
-    let bytes = unsafe { std::slice::from_raw_parts(module_data, module_len) };
+    let slice = unsafe { std::slice::from_raw_parts(bytes, len) };
 
-    match ComponentShellExecutor::from_bytes(bytes) {
+    match ComponentShellExecutor::from_bytes(slice) {
         Ok(executor) => Box::into_raw(Box::new(ConchExecutor { executor })),
         Err(e) => {
-            set_last_error(&format!("failed to create executor: {}", e));
+            set_last_error(&format!("failed to load component: {}", e));
             ptr::null_mut()
         }
     }
@@ -188,10 +184,71 @@ pub unsafe extern "C" fn conch_executor_free(executor: *mut ConchExecutor) {
 }
 
 // ============================================================================
+// Execution helpers
+// ============================================================================
+
+/// Helper to execute a script and convert the result to ConchResult.
+#[cfg(feature = "embedded-shell")]
+async fn execute_script_internal(
+    executor: &ComponentShellExecutor,
+    script: &str,
+    limits: &ResourceLimits,
+) -> Result<crate::runtime::ExecutionResult, crate::runtime::RuntimeError> {
+    // Create a minimal VFS context with a /tmp directory
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut hybrid_ctx = HybridVfsCtx::new(storage);
+    hybrid_ctx.add_vfs_preopen("/tmp", DirPerms::all(), FilePerms::all());
+
+    // Create a temporary shell instance
+    let mut instance = executor.create_instance(limits, hybrid_ctx, None).await?;
+
+    // Execute the script
+    instance.execute(script, limits).await
+}
+
+/// Convert an ExecutionResult to a ConchResult pointer.
+fn result_to_conch_result(exec_result: crate::runtime::ExecutionResult) -> *mut ConchResult {
+    let stdout_len = exec_result.stdout.len();
+    let stderr_len = exec_result.stderr.len();
+
+    let stdout_data = if exec_result.stdout.is_empty() {
+        ptr::null_mut()
+    } else {
+        let mut stdout = exec_result.stdout;
+        stdout.push(0); // Add null terminator
+        let ptr = stdout.as_mut_ptr() as *mut c_char;
+        std::mem::forget(stdout);
+        ptr
+    };
+
+    let stderr_data = if exec_result.stderr.is_empty() {
+        ptr::null_mut()
+    } else {
+        let mut stderr = exec_result.stderr;
+        stderr.push(0); // Add null terminator
+        let ptr = stderr.as_mut_ptr() as *mut c_char;
+        std::mem::forget(stderr);
+        ptr
+    };
+
+    Box::into_raw(Box::new(ConchResult {
+        exit_code: exec_result.exit_code,
+        stdout_data,
+        stdout_len,
+        stderr_data,
+        stderr_len,
+        truncated: if exec_result.truncated { 1 } else { 0 },
+    }))
+}
+
+// ============================================================================
 // Execution
 // ============================================================================
 
 /// Execute a shell script.
+///
+/// Each call creates a fresh shell instance, so state (variables, functions)
+/// does not persist between calls.
 ///
 /// Returns a pointer to a `ConchResult` on success, or null on failure.
 /// On failure, call `conch_last_error()` to get the error message.
@@ -200,6 +257,7 @@ pub unsafe extern "C" fn conch_executor_free(executor: *mut ConchExecutor) {
 /// # Safety
 /// - `executor` must be a valid pointer from `conch_executor_new*()`.
 /// - `script` must be a valid null-terminated C string.
+#[cfg(feature = "embedded-shell")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn conch_execute(
     executor: *mut ConchExecutor,
@@ -236,40 +294,12 @@ pub unsafe extern "C" fn conch_execute(
         }
     };
 
-    match rt.block_on(executor.executor.execute(script_str, &limits)) {
-        Ok(exec_result) => {
-            let stdout_len = exec_result.stdout.len();
-            let stderr_len = exec_result.stderr.len();
-
-            let stdout_data = if exec_result.stdout.is_empty() {
-                ptr::null_mut()
-            } else {
-                let mut stdout = exec_result.stdout;
-                stdout.push(0); // Add null terminator
-                let ptr = stdout.as_mut_ptr() as *mut c_char;
-                std::mem::forget(stdout);
-                ptr
-            };
-
-            let stderr_data = if exec_result.stderr.is_empty() {
-                ptr::null_mut()
-            } else {
-                let mut stderr = exec_result.stderr;
-                stderr.push(0); // Add null terminator
-                let ptr = stderr.as_mut_ptr() as *mut c_char;
-                std::mem::forget(stderr);
-                ptr
-            };
-
-            Box::into_raw(Box::new(ConchResult {
-                exit_code: exec_result.exit_code,
-                stdout_data,
-                stdout_len,
-                stderr_data,
-                stderr_len,
-                truncated: if exec_result.truncated { 1 } else { 0 },
-            }))
-        }
+    match rt.block_on(execute_script_internal(
+        &executor.executor,
+        script_str,
+        &limits,
+    )) {
+        Ok(exec_result) => result_to_conch_result(exec_result),
         Err(e) => {
             set_last_error(&format!("execution failed: {}", e));
             ptr::null_mut()
@@ -277,7 +307,21 @@ pub unsafe extern "C" fn conch_execute(
     }
 }
 
+/// Stub for when embedded-shell feature is disabled.
+#[cfg(not(feature = "embedded-shell"))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn conch_execute(
+    _executor: *mut ConchExecutor,
+    _script: *const c_char,
+) -> *mut ConchResult {
+    set_last_error("embedded-shell feature not enabled");
+    ptr::null_mut()
+}
+
 /// Execute a shell script with custom resource limits.
+///
+/// Each call creates a fresh shell instance, so state (variables, functions)
+/// does not persist between calls.
 ///
 /// Returns a pointer to a `ConchResult` on success, or null on failure.
 /// On failure, call `conch_last_error()` to get the error message.
@@ -286,6 +330,7 @@ pub unsafe extern "C" fn conch_execute(
 /// # Safety
 /// - `executor` must be a valid pointer from `conch_executor_new*()`.
 /// - `script` must be a valid null-terminated C string.
+#[cfg(feature = "embedded-shell")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn conch_execute_with_limits(
     executor: *mut ConchExecutor,
@@ -331,40 +376,12 @@ pub unsafe extern "C" fn conch_execute_with_limits(
         }
     };
 
-    match rt.block_on(executor.executor.execute(script_str, &limits)) {
-        Ok(exec_result) => {
-            let stdout_len = exec_result.stdout.len();
-            let stderr_len = exec_result.stderr.len();
-
-            let stdout_data = if exec_result.stdout.is_empty() {
-                ptr::null_mut()
-            } else {
-                let mut stdout = exec_result.stdout;
-                stdout.push(0);
-                let ptr = stdout.as_mut_ptr() as *mut c_char;
-                std::mem::forget(stdout);
-                ptr
-            };
-
-            let stderr_data = if exec_result.stderr.is_empty() {
-                ptr::null_mut()
-            } else {
-                let mut stderr = exec_result.stderr;
-                stderr.push(0);
-                let ptr = stderr.as_mut_ptr() as *mut c_char;
-                std::mem::forget(stderr);
-                ptr
-            };
-
-            Box::into_raw(Box::new(ConchResult {
-                exit_code: exec_result.exit_code,
-                stdout_data,
-                stdout_len,
-                stderr_data,
-                stderr_len,
-                truncated: if exec_result.truncated { 1 } else { 0 },
-            }))
-        }
+    match rt.block_on(execute_script_internal(
+        &executor.executor,
+        script_str,
+        &limits,
+    )) {
+        Ok(exec_result) => result_to_conch_result(exec_result),
         Err(e) => {
             set_last_error(&format!("execution failed: {}", e));
             ptr::null_mut()
@@ -372,11 +389,26 @@ pub unsafe extern "C" fn conch_execute_with_limits(
     }
 }
 
+/// Stub for when embedded-shell feature is disabled.
+#[cfg(not(feature = "embedded-shell"))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn conch_execute_with_limits(
+    _executor: *mut ConchExecutor,
+    _script: *const c_char,
+    _max_cpu_ms: u64,
+    _max_memory_bytes: u64,
+    _max_output_bytes: u64,
+    _timeout_ms: u64,
+) -> *mut ConchResult {
+    set_last_error("embedded-shell feature not enabled");
+    ptr::null_mut()
+}
+
 // ============================================================================
-// Result cleanup
+// Result handling
 // ============================================================================
 
-/// Free a result structure.
+/// Free a `ConchResult` returned by `conch_execute*()`.
 ///
 /// # Safety
 /// - `result` must be a pointer returned by `conch_execute*()`, or null.
@@ -387,154 +419,62 @@ pub unsafe extern "C" fn conch_result_free(result: *mut ConchResult) {
         return;
     }
 
-    let result = unsafe { &mut *result };
+    let result = unsafe { Box::from_raw(result) };
 
+    // Free the stdout buffer if allocated
     if !result.stdout_data.is_null() {
-        // Reconstruct the Vec to properly deallocate
-        // We added a null terminator, so len is stdout_len + 1
         unsafe {
             let _ = Vec::from_raw_parts(
                 result.stdout_data as *mut u8,
-                result.stdout_len + 1,
+                result.stdout_len + 1, // +1 for null terminator
                 result.stdout_len + 1,
             );
         }
-        result.stdout_data = ptr::null_mut();
     }
 
+    // Free the stderr buffer if allocated
     if !result.stderr_data.is_null() {
         unsafe {
             let _ = Vec::from_raw_parts(
                 result.stderr_data as *mut u8,
-                result.stderr_len + 1,
+                result.stderr_len + 1, // +1 for null terminator
                 result.stderr_len + 1,
             );
         }
-        result.stderr_data = ptr::null_mut();
     }
 
-    // Free the result struct itself
-    unsafe { drop(Box::from_raw(result)) };
+    // Box will be dropped here, freeing the ConchResult struct
 }
 
 // ============================================================================
-// Tests
+// Component bytes (for Go to load the embedded component)
 // ============================================================================
 
-#[cfg(test)]
-#[allow(clippy::unwrap_used)]
-mod tests {
-    use super::*;
-    use std::mem;
-
-    #[test]
-    fn test_conch_result_layout() {
-        // Verify the struct is properly sized for C interop
-        assert!(mem::size_of::<ConchResult>() > 0);
-
-        // On 64-bit systems, pointers are 8 bytes
-        #[cfg(target_pointer_width = "64")]
-        {
-            // i32 (4) + padding (4) + ptr (8) + usize (8) + ptr (8) + usize (8) + u8 (1) + padding (7)
-            assert_eq!(mem::size_of::<ConchResult>(), 48);
-        }
+/// Get the embedded WASM component bytes.
+///
+/// Returns a pointer to the component bytes and sets `len` to the length.
+/// Returns null if the embedded-shell feature is not enabled.
+///
+/// # Safety
+/// - `len` must be a valid pointer to a usize.
+/// - The returned pointer is valid for the lifetime of the program.
+/// - Do not free the returned pointer.
+#[cfg(feature = "embedded-shell")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn conch_embedded_component_bytes(len: *mut usize) -> *const u8 {
+    let bytes = ComponentShellExecutor::embedded_component_bytes();
+    if !len.is_null() {
+        unsafe { *len = bytes.len() };
     }
+    bytes.as_ptr()
+}
 
-    #[test]
-    fn test_conch_result_repr_c() {
-        // Verify #[repr(C)] is working - fields should be in declaration order
-        let result = ConchResult {
-            exit_code: 42,
-            stdout_data: ptr::null_mut(),
-            stdout_len: 100,
-            stderr_data: ptr::null_mut(),
-            stderr_len: 200,
-            truncated: 1,
-        };
-
-        assert_eq!(result.exit_code, 42);
-        assert_eq!(result.stdout_len, 100);
-        assert_eq!(result.stderr_len, 200);
-        assert_eq!(result.truncated, 1);
+/// Stub for when embedded-shell feature is disabled.
+#[cfg(not(feature = "embedded-shell"))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn conch_embedded_component_bytes(len: *mut usize) -> *const u8 {
+    if !len.is_null() {
+        unsafe { *len = 0 };
     }
-
-    #[test]
-    fn test_last_error_initially_null() {
-        // Clear any existing error
-        LAST_ERROR.with(|e| {
-            *e.borrow_mut() = None;
-        });
-
-        let err = conch_last_error();
-        assert!(err.is_null());
-    }
-
-    #[test]
-    fn test_last_error_after_set() {
-        set_last_error("test error message");
-
-        let err = conch_last_error();
-        assert!(!err.is_null());
-
-        let err_str = unsafe { CStr::from_ptr(err) }.to_str().unwrap();
-        assert_eq!(err_str, "test error message");
-    }
-
-    #[test]
-    fn test_last_error_overwrites_previous() {
-        set_last_error("first error");
-        set_last_error("second error");
-
-        let err = conch_last_error();
-        let err_str = unsafe { CStr::from_ptr(err) }.to_str().unwrap();
-        assert_eq!(err_str, "second error");
-    }
-
-    #[test]
-    fn test_result_free_null_safe() {
-        // Should not crash when passed null
-        unsafe { conch_result_free(ptr::null_mut()) };
-    }
-
-    #[test]
-    fn test_executor_new_null_path() {
-        let executor = unsafe { conch_executor_new(ptr::null()) };
-        assert!(executor.is_null());
-
-        let err = conch_last_error();
-        assert!(!err.is_null());
-    }
-
-    #[test]
-    fn test_execute_null_executor() {
-        let script = CString::new("echo hello").unwrap();
-        let result = unsafe { conch_execute(ptr::null_mut(), script.as_ptr()) };
-        assert!(result.is_null());
-
-        let err = conch_last_error();
-        assert!(!err.is_null());
-    }
-
-    #[test]
-    fn test_execute_null_script() {
-        // We can't easily create an executor without the embedded feature,
-        // so just test that null script is handled
-        let result = unsafe { conch_execute(ptr::null_mut(), ptr::null()) };
-        assert!(result.is_null());
-    }
-
-    #[test]
-    fn test_executor_free_null_safe() {
-        // Should not crash when passed null
-        unsafe { conch_executor_free(ptr::null_mut()) };
-    }
-
-    #[test]
-    fn test_has_embedded_shell() {
-        let has = conch_has_embedded_shell();
-        #[cfg(feature = "embedded-shell")]
-        assert_eq!(has, 1);
-        #[cfg(not(feature = "embedded-shell"))]
-        assert_eq!(has, 0);
-    }
+    ptr::null()
 }

@@ -1,15 +1,17 @@
 //! WebAssembly runtime for executing shell scripts using the component model (wasip2).
 //!
 //! This module handles loading and running the conch-shell WASM component using wasmtime
-//! with the component model. It uses the `InstancePre` pattern for efficient per-execution
-//! instantiation.
+//! with the component model.
+//!
+//! ## Shell Resource
+//!
+//! The executor now supports creating persistent shell instances via the WIT `shell` resource.
+//! Shell state (variables, functions, aliases) persists across multiple `execute` calls on
+//! the same instance.
 //!
 //! ## VFS Integration
 //!
-//! The executor supports two modes:
-//!
-//! - **Basic mode**: Standard WASI filesystem (no VFS)
-//! - **Hybrid VFS mode**: Combines virtual storage with real filesystem mounts
+//! The executor supports hybrid VFS mode that combines virtual storage with real filesystem mounts.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -27,15 +29,16 @@ use crate::limits::ResourceLimits;
 use crate::runtime::{ExecutionResult, RuntimeError};
 
 // Generate host bindings for the shell component.
-// This creates the `Shell` struct for calling into the component,
-// and the `ShellImports` trait with async invoke_tool method.
 wasmtime::component::bindgen!({
     path: "wit/shell.wit",
-    world: "shell",
-    // Enable async for both imports (tool invocation) and exports (execute)
-    imports: { default: async },
+    world: "shell-sandbox",
+    // Make exports async so we can call them from async Rust code
+    // when the engine has async_support(true) enabled.
     exports: { default: async },
 });
+
+// Re-export the generated types for public use
+pub use conch::shell::tools::{ToolRequest, ToolResult};
 
 /// Handler for tool invocations from shell scripts.
 ///
@@ -97,16 +100,6 @@ where
 static EMBEDDED_COMPONENT: &[u8] =
     include_bytes!("../../../../target/wasm32-wasip2/release/conch_shell.wasm");
 
-/// State held by the WASM store during execution.
-pub struct ComponentState {
-    wasi: WasiCtx,
-    table: ResourceTable,
-    stdout_pipe: MemoryOutputPipe,
-    stderr_pipe: MemoryOutputPipe,
-    limiter: StoreLimiter,
-    tool_handler: Option<Arc<dyn ToolHandler>>,
-}
-
 /// Default tool handler that returns an error.
 fn default_tool_handler(request: &ToolRequest) -> ToolResult {
     ToolResult {
@@ -115,65 +108,6 @@ fn default_tool_handler(request: &ToolRequest) -> ToolResult {
             "No tool handler configured. Cannot execute tool: {}",
             request.tool
         ),
-    }
-}
-
-impl ComponentState {
-    /// Create a new component state with fresh pipes for capturing output.
-    fn new(output_capacity: usize, max_memory_bytes: u64) -> Self {
-        Self::with_tool_handler(output_capacity, max_memory_bytes, None)
-    }
-
-    /// Create a new component state with a custom tool handler.
-    fn with_tool_handler(
-        output_capacity: usize,
-        max_memory_bytes: u64,
-        tool_handler: Option<Arc<dyn ToolHandler>>,
-    ) -> Self {
-        let stdout_pipe = MemoryOutputPipe::new(output_capacity);
-        let stderr_pipe = MemoryOutputPipe::new(output_capacity);
-
-        let wasi = WasiCtxBuilder::new()
-            .stdout(stdout_pipe.clone())
-            .stderr(stderr_pipe.clone())
-            .build();
-
-        Self {
-            wasi,
-            table: ResourceTable::new(),
-            stdout_pipe,
-            stderr_pipe,
-            limiter: StoreLimiter::new(max_memory_bytes),
-            tool_handler,
-        }
-    }
-
-    /// Get the captured stdout contents.
-    fn stdout(&self) -> Vec<u8> {
-        self.stdout_pipe.contents().to_vec()
-    }
-
-    /// Get the captured stderr contents.
-    fn stderr(&self) -> Vec<u8> {
-        self.stderr_pipe.contents().to_vec()
-    }
-}
-
-impl ShellImports for ComponentState {
-    async fn invoke_tool(&mut self, request: ToolRequest) -> ToolResult {
-        match &self.tool_handler {
-            Some(handler) => handler.invoke(request).await,
-            None => default_tool_handler(&request),
-        }
-    }
-}
-
-impl WasiView for ComponentState {
-    fn ctx(&mut self) -> WasiCtxView<'_> {
-        WasiCtxView {
-            ctx: &mut self.wasi,
-            table: &mut self.table,
-        }
     }
 }
 
@@ -195,7 +129,7 @@ pub struct HybridComponentState<S: VfsStorage + 'static> {
 #[cfg(feature = "embedded-shell")]
 impl<S: VfsStorage + 'static> HybridComponentState<S> {
     /// Create a new hybrid component state with an optional tool handler.
-    fn new(
+    pub fn new(
         output_capacity: usize,
         max_memory_bytes: u64,
         hybrid_vfs_ctx: HybridVfsCtx<S>,
@@ -221,21 +155,26 @@ impl<S: VfsStorage + 'static> HybridComponentState<S> {
     }
 
     /// Get the captured stdout contents.
-    fn stdout(&self) -> Vec<u8> {
+    pub fn stdout(&self) -> Vec<u8> {
         self.stdout_pipe.contents().to_vec()
     }
 
     /// Get the captured stderr contents.
-    fn stderr(&self) -> Vec<u8> {
+    pub fn stderr(&self) -> Vec<u8> {
         self.stderr_pipe.contents().to_vec()
     }
 }
 
 #[cfg(feature = "embedded-shell")]
-impl<S: VfsStorage + 'static> ShellImports for HybridComponentState<S> {
-    async fn invoke_tool(&mut self, request: ToolRequest) -> ToolResult {
+impl<S: VfsStorage + 'static> conch::shell::tools::Host for HybridComponentState<S> {
+    fn invoke_tool(&mut self, request: ToolRequest) -> ToolResult {
+        // For synchronous trait, we need to block on the async handler.
+        // We use futures::executor::block_on instead of tokio's block_on
+        // to avoid "cannot start a runtime from within a runtime" panic
+        // since this is called from within WASM execution which is already
+        // running in the tokio runtime.
         match &self.tool_handler {
-            Some(handler) => handler.invoke(request).await,
+            Some(handler) => futures::executor::block_on(handler.invoke(request)),
             None => default_tool_handler(&request),
         }
     }
@@ -262,24 +201,13 @@ impl<S: VfsStorage + 'static> HybridVfsView for HybridComponentState<S> {
 
 /// Executor for running shell scripts in WASM using the component model.
 ///
-/// This pre-links the WASI component once at construction time, then efficiently
-/// instantiates per execution call. The `Engine` and `InstancePre` are shared
-/// across all executions, while each execution gets its own `Store` with fresh
-/// WASI context and output pipes.
-///
-/// ## VFS Support
-///
-/// The executor supports two modes:
-/// - **Basic mode**: Uses standard WASI filesystem (default)
-/// - **Hybrid VFS mode**: Combines virtual storage with real filesystem mounts
-///
-/// For hybrid VFS, use the [`Shell`](crate::Shell) API which provides a higher-level
-/// interface with builder pattern for configuring mounts.
+/// This handles loading the WASM component and setting up the execution environment.
+/// For persistent shell state, use [`ShellInstance`] which maintains state across
+/// multiple execute calls.
 #[derive(Clone)]
 pub struct ComponentShellExecutor {
     engine: Arc<Engine>,
-    /// Pre-instantiated component for basic execution (WASI only).
-    instance_pre: Arc<wasmtime::component::InstancePre<ComponentState>>,
+    component_bytes: Arc<Vec<u8>>,
 }
 
 impl std::fmt::Debug for ComponentShellExecutor {
@@ -292,18 +220,20 @@ impl std::fmt::Debug for ComponentShellExecutor {
 impl ComponentShellExecutor {
     /// Create a new executor by loading a component from a file.
     pub fn from_file(path: impl AsRef<Path>) -> Result<Self, RuntimeError> {
-        let engine = Self::create_engine()?;
-        let component = Component::from_file(&engine, path.as_ref())
-            .map_err(|e| RuntimeError::Wasm(e.to_string()))?;
-        Self::from_component(engine, component)
+        let bytes = std::fs::read(path.as_ref())
+            .map_err(|e| RuntimeError::Wasm(format!("failed to read component file: {}", e)))?;
+        Self::from_bytes(&bytes)
     }
 
     /// Create a new executor by loading a component from bytes.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, RuntimeError> {
         let engine = Self::create_engine()?;
-        let component =
-            Component::new(&engine, bytes).map_err(|e| RuntimeError::Wasm(e.to_string()))?;
-        Self::from_component(engine, component)
+        // Validate the component can be loaded
+        Component::new(&engine, bytes).map_err(|e| RuntimeError::Wasm(e.to_string()))?;
+        Ok(Self {
+            engine: Arc::new(engine),
+            component_bytes: Arc::new(bytes.to_vec()),
+        })
     }
 
     /// Create a new executor using the embedded WASM component.
@@ -328,52 +258,169 @@ impl ComponentShellExecutor {
         Engine::new(&config).map_err(|e| RuntimeError::Wasm(e.to_string()))
     }
 
-    /// Create an executor from an existing engine and component.
-    fn from_component(engine: Engine, component: Component) -> Result<Self, RuntimeError> {
-        // Create linker with WASI and shell imports
-        let mut linker = Linker::new(&engine);
-        wasmtime_wasi::p2::add_to_linker_async(&mut linker)
-            .map_err(|e| RuntimeError::Wasm(e.to_string()))?;
-
-        // Add shell imports (invoke-tool) using generated linker function
-        Shell::add_to_linker_imports::<_, HasSelf<ComponentState>>(&mut linker, |state| state)
-            .map_err(|e| RuntimeError::Wasm(e.to_string()))?;
-
-        // Pre-instantiate for basic execution
-        let instance_pre = linker
-            .instantiate_pre(&component)
-            .map_err(|e| RuntimeError::Wasm(e.to_string()))?;
-
-        Ok(Self {
-            engine: Arc::new(engine),
-            instance_pre: Arc::new(instance_pre),
-        })
-    }
-
     /// Get a reference to the underlying engine.
     pub fn engine(&self) -> &Engine {
         &self.engine
     }
 
-    /// Execute a shell script asynchronously.
+    /// Create a persistent shell instance with hybrid VFS.
     ///
-    /// Each execution gets a fresh store with isolated WASI context.
-    /// Output is captured via memory pipes and returned in the result.
-    pub async fn execute(
+    /// This creates a new WASM instance with a shell resource that maintains
+    /// state across multiple `execute` calls. The instance has its own isolated
+    /// filesystem and shell state.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let storage = Arc::new(InMemoryStorage::new());
+    /// let mut hybrid_ctx = HybridVfsCtx::new(storage);
+    /// hybrid_ctx.add_vfs_preopen("/scratch", DirPerms::all(), FilePerms::all());
+    ///
+    /// let mut instance = executor.create_instance(
+    ///     &limits,
+    ///     hybrid_ctx,
+    ///     None, // No tool handler
+    /// ).await?;
+    ///
+    /// // State persists across calls
+    /// instance.execute("x=42").await?;
+    /// instance.execute("echo $x").await?;  // Outputs "42"
+    /// ```
+    #[cfg(feature = "embedded-shell")]
+    pub async fn create_instance<S: VfsStorage + 'static>(
         &self,
-        script: &str,
         limits: &ResourceLimits,
-    ) -> Result<ExecutionResult, RuntimeError> {
-        // Create fresh state for this execution
-        let state = ComponentState::new(limits.max_output_bytes as usize, limits.max_memory_bytes);
+        hybrid_ctx: HybridVfsCtx<S>,
+        tool_handler: Option<Arc<dyn ToolHandler>>,
+    ) -> Result<ShellInstance<S>, RuntimeError> {
+        ShellInstance::new(
+            self.engine.clone(),
+            self.component_bytes.clone(),
+            limits,
+            hybrid_ctx,
+            tool_handler,
+        )
+        .await
+    }
+}
 
-        let mut store = Store::new(&self.engine, state);
+/// A persistent shell instance with isolated filesystem and state.
+///
+/// This holds a WASM Store and shell resource handle, allowing shell state
+/// (variables, functions, aliases) to persist across multiple `execute` calls.
+///
+/// Each `ShellInstance` has its own:
+/// - WASM linear memory (isolated from other instances)
+/// - Filesystem (via HybridVfsCtx)
+/// - Shell state (variables, functions, aliases)
+#[cfg(feature = "embedded-shell")]
+pub struct ShellInstance<S: VfsStorage + 'static> {
+    store: Store<HybridComponentState<S>>,
+    shell_resource: wasmtime::component::ResourceAny,
+    bindings: ShellSandbox,
+    engine: Arc<Engine>,
+}
+
+#[cfg(feature = "embedded-shell")]
+impl<S: VfsStorage + 'static> std::fmt::Debug for ShellInstance<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ShellInstance").finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "embedded-shell")]
+impl<S: VfsStorage + 'static> ShellInstance<S> {
+    /// Create a new shell instance.
+    async fn new(
+        engine: Arc<Engine>,
+        component_bytes: Arc<Vec<u8>>,
+        limits: &ResourceLimits,
+        hybrid_ctx: HybridVfsCtx<S>,
+        tool_handler: Option<Arc<dyn ToolHandler>>,
+    ) -> Result<Self, RuntimeError> {
+        // Create state with hybrid VFS context
+        let state = HybridComponentState::new(
+            limits.max_output_bytes as usize,
+            limits.max_memory_bytes,
+            hybrid_ctx,
+            tool_handler,
+        );
+
+        let mut store = Store::new(&engine, state);
 
         // Set up resource limiter
         store.limiter(|state| &mut state.limiter);
 
+        // Create linker with WASI and hybrid VFS
+        let mut linker = Linker::<HybridComponentState<S>>::new(&engine);
+        wasmtime_wasi::p2::add_to_linker_async(&mut linker)
+            .map_err(|e| RuntimeError::Wasm(e.to_string()))?;
+        linker.allow_shadowing(true);
+        add_hybrid_vfs_to_linker(&mut linker).map_err(|e| {
+            RuntimeError::Wasm(format!("failed to add hybrid VFS to linker: {}", e))
+        })?;
+        // Add shell imports (invoke-tool) using HasSelf wrapper for type projection
+        ShellSandbox::add_to_linker::<_, HasSelf<HybridComponentState<S>>>(&mut linker, |state| {
+            state
+        })
+        .map_err(|e| RuntimeError::Wasm(e.to_string()))?;
+        linker.allow_shadowing(false);
+
+        // Load the component
+        let component = Component::new(&engine, &*component_bytes)
+            .map_err(|e| RuntimeError::Wasm(e.to_string()))?;
+
+        // Instantiate the component
+        let bindings = ShellSandbox::instantiate_async(&mut store, &component, &linker)
+            .await
+            .map_err(|e| RuntimeError::Wasm(format!("instantiation failed: {}", e)))?;
+
+        // Set a generous epoch deadline for constructor (shell initialization can take time)
+        // The constructor creates a tokio runtime and brush shell, which is expensive.
+        store.set_epoch_deadline(u64::MAX);
+
+        // Create the shell resource via its constructor
+        let shell_interface = bindings.conch_shell_shell();
+        let shell_resource = shell_interface
+            .instance()
+            .call_constructor(&mut store)
+            .await
+            .map_err(|e| {
+                // Try to get more details from the error
+                let mut details = format!("failed to create shell instance: {}", e);
+                if let Some(source) = e.source() {
+                    details.push_str(&format!("\n  caused by: {}", source));
+                }
+                // Check for trap info
+                if let Some(trap) = e.downcast_ref::<wasmtime::Trap>() {
+                    details.push_str(&format!("\n  trap: {:?}", trap));
+                }
+                RuntimeError::Wasm(details)
+            })?;
+
+        Ok(Self {
+            store,
+            shell_resource,
+            bindings,
+            engine,
+        })
+    }
+
+    /// Execute a shell script.
+    ///
+    /// Variables, functions, and aliases defined in previous calls persist.
+    /// stdout/stderr are captured and returned in the result.
+    pub async fn execute(
+        &mut self,
+        script: &str,
+        limits: &ResourceLimits,
+    ) -> Result<ExecutionResult, RuntimeError> {
+        // Clear previous output
+        let _ = self.store.data().stdout();
+        let _ = self.store.data().stderr();
+
         // Set up epoch-based timeout
-        store.set_epoch_deadline(limits.max_cpu_ms);
+        self.store.set_epoch_deadline(limits.max_cpu_ms);
 
         // Increment epoch in background for timeout
         let engine = self.engine.clone();
@@ -383,25 +430,19 @@ impl ComponentShellExecutor {
             engine.increment_epoch();
         });
 
-        // Instantiate the component
-        let instance = self
-            .instance_pre
-            .instantiate_async(&mut store)
+        // Call execute on the shell resource
+        let shell_interface = self.bindings.conch_shell_shell();
+        let result = shell_interface
+            .instance()
+            .call_execute(&mut self.store, self.shell_resource, script)
             .await
-            .map_err(|e| RuntimeError::Wasm(format!("instantiation failed: {}", e)))?;
-
-        // Get the shell interface and call execute
-        let shell = Shell::new(&mut store, &instance)
-            .map_err(|e| RuntimeError::Wasm(format!("failed to get shell interface: {}", e)))?;
-
-        let result = shell.call_execute(&mut store, script).await.map_err(|e| {
-            // Check if this was a timeout
-            if e.to_string().contains("epoch") {
-                RuntimeError::Timeout
-            } else {
-                RuntimeError::Wasm(format!("execute failed: {}", e))
-            }
-        })?;
+            .map_err(|e: wasmtime::Error| {
+                if e.to_string().contains("epoch") {
+                    RuntimeError::Timeout
+                } else {
+                    RuntimeError::Wasm(format!("execute failed: {}", e))
+                }
+            })?;
 
         // Cancel the timeout task
         epoch_handle.abort();
@@ -421,138 +462,9 @@ impl ComponentShellExecutor {
             }
         };
 
-        // Get captured output from the WASI pipes.
-        // The shell writes to WASI stdout/stderr which we intercept via MemoryOutputPipe.
-        let state = store.data();
-        let stdout = state.stdout();
-        let stderr = state.stderr();
-
-        Ok(ExecutionResult {
-            exit_code,
-            stdout,
-            stderr,
-            truncated: false,
-            stats: crate::runtime::ExecutionStats::default(),
-        })
-    }
-
-    /// Execute a shell script with hybrid VFS (virtual storage + real filesystem).
-    ///
-    /// This method supports the Shell API that combines:
-    /// - VFS storage paths (backed by `VfsStorage` trait)
-    /// - Real filesystem mounts (backed by cap-std)
-    ///
-    /// The `HybridVfsCtx` should be pre-configured with preopened directories
-    /// via `add_vfs_preopen()` and `add_real_preopen()`.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let storage = Arc::new(InMemoryStorage::new());
-    /// let mut hybrid_ctx = HybridVfsCtx::new(storage);
-    /// hybrid_ctx.add_vfs_preopen("/scratch", DirPerms::all(), FilePerms::all());
-    /// hybrid_ctx.add_real_preopen_path("/project", "./code", DirPerms::READ, FilePerms::READ)?;
-    ///
-    /// let result = executor.execute_with_hybrid_vfs(
-    ///     "cat /project/README.md",
-    ///     &limits,
-    ///     hybrid_ctx,
-    ///     None, // No tool handler
-    /// ).await?;
-    /// ```
-    #[cfg(feature = "embedded-shell")]
-    pub async fn execute_with_hybrid_vfs<S: VfsStorage + 'static>(
-        &self,
-        script: &str,
-        limits: &ResourceLimits,
-        hybrid_ctx: HybridVfsCtx<S>,
-        tool_handler: Option<Arc<dyn ToolHandler>>,
-    ) -> Result<ExecutionResult, RuntimeError> {
-        // Create state with hybrid VFS context and optional tool handler
-        let state = HybridComponentState::new(
-            limits.max_output_bytes as usize,
-            limits.max_memory_bytes,
-            hybrid_ctx,
-            tool_handler,
-        );
-
-        let mut store = Store::new(&self.engine, state);
-
-        // Set up resource limiter
-        store.limiter(|state| &mut state.limiter);
-
-        // Set up epoch-based timeout
-        store.set_epoch_deadline(limits.max_cpu_ms);
-
-        // Increment epoch in background for timeout
-        let engine = self.engine.clone();
-        let timeout_ms = limits.max_cpu_ms;
-        let epoch_handle = tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(timeout_ms)).await;
-            engine.increment_epoch();
-        });
-
-        // We need a linker for hybrid VFS - create it on demand
-        // Note: This is less efficient than pre-instantiation, but hybrid VFS
-        // requires the storage type at link time. A future optimization could
-        // cache linkers per storage type.
-        let mut linker = Linker::<HybridComponentState<S>>::new(&self.engine);
-        wasmtime_wasi::p2::add_to_linker_async(&mut linker)
-            .map_err(|e| RuntimeError::Wasm(e.to_string()))?;
-        linker.allow_shadowing(true);
-        add_hybrid_vfs_to_linker(&mut linker).map_err(|e| {
-            RuntimeError::Wasm(format!("failed to add hybrid VFS to linker: {}", e))
-        })?;
-        // Add shell imports (invoke-tool) using generated linker function
-        Shell::add_to_linker_imports::<_, HasSelf<HybridComponentState<S>>>(&mut linker, |state| {
-            state
-        })
-        .map_err(|e| RuntimeError::Wasm(e.to_string()))?;
-        linker.allow_shadowing(false);
-
-        // Load the component
-        let component = Component::new(&self.engine, EMBEDDED_COMPONENT)
-            .map_err(|e| RuntimeError::Wasm(e.to_string()))?;
-
-        // Instantiate the component
-        let instance = linker
-            .instantiate_async(&mut store, &component)
-            .await
-            .map_err(|e| RuntimeError::Wasm(format!("instantiation failed: {}", e)))?;
-
-        // Get the shell interface and call execute
-        let shell = Shell::new(&mut store, &instance)
-            .map_err(|e| RuntimeError::Wasm(format!("failed to get shell interface: {}", e)))?;
-
-        let result = shell.call_execute(&mut store, script).await.map_err(|e| {
-            if e.to_string().contains("epoch") {
-                RuntimeError::Timeout
-            } else {
-                RuntimeError::Wasm(format!("execute failed: {}", e))
-            }
-        })?;
-
-        // Cancel the timeout task
-        epoch_handle.abort();
-
-        // Handle the result
-        let exit_code = match result {
-            Ok(code) => code,
-            Err(error_msg) => {
-                return Ok(ExecutionResult {
-                    exit_code: 1,
-                    stdout: Vec::new(),
-                    stderr: error_msg.into_bytes(),
-                    truncated: false,
-                    stats: crate::runtime::ExecutionStats::default(),
-                });
-            }
-        };
-
         // Get captured output
-        let state = store.data();
-        let stdout = state.stdout();
-        let stderr = state.stderr();
+        let stdout = self.store.data().stdout();
+        let stderr = self.store.data().stderr();
 
         Ok(ExecutionResult {
             exit_code,
@@ -563,28 +475,45 @@ impl ComponentShellExecutor {
         })
     }
 
-    /// Execute a shell script with hybrid VFS (stub for when embedded-shell is disabled).
-    #[cfg(not(feature = "embedded-shell"))]
-    pub async fn execute_with_hybrid_vfs<S: VfsStorage + 'static>(
-        &self,
-        _script: &str,
-        _limits: &ResourceLimits,
-        _hybrid_ctx: HybridVfsCtx<S>,
-        _tool_handler: Option<Arc<dyn ToolHandler>>,
-    ) -> Result<ExecutionResult, RuntimeError> {
-        Err(RuntimeError::Wasm(
-            "execute_with_hybrid_vfs requires embedded-shell feature".to_string(),
-        ))
+    /// Get a shell variable's value.
+    pub async fn get_var(&mut self, name: &str) -> Result<Option<String>, RuntimeError> {
+        let shell_interface = self.bindings.conch_shell_shell();
+        shell_interface
+            .instance()
+            .call_get_var(&mut self.store, self.shell_resource, name)
+            .await
+            .map_err(|e| RuntimeError::Wasm(format!("get_var failed: {}", e)))
+    }
+
+    /// Set a shell variable.
+    pub async fn set_var(&mut self, name: &str, value: &str) -> Result<(), RuntimeError> {
+        let shell_interface = self.bindings.conch_shell_shell();
+        shell_interface
+            .instance()
+            .call_set_var(&mut self.store, self.shell_resource, name, value)
+            .await
+            .map_err(|e| RuntimeError::Wasm(format!("set_var failed: {}", e)))
+    }
+
+    /// Get the exit code from the last executed command.
+    pub async fn last_exit_code(&mut self) -> Result<i32, RuntimeError> {
+        let shell_interface = self.bindings.conch_shell_shell();
+        shell_interface
+            .instance()
+            .call_last_exit_code(&mut self.store, self.shell_resource)
+            .await
+            .map_err(|e| RuntimeError::Wasm(format!("last_exit_code failed: {}", e)))
     }
 }
 
 /// Simple memory limiter for WASM execution.
-struct StoreLimiter {
+pub struct StoreLimiter {
     max_memory: u64,
 }
 
 impl StoreLimiter {
-    fn new(max_memory: u64) -> Self {
+    /// Create a new store limiter with the given memory limit.
+    pub fn new(max_memory: u64) -> Self {
         Self { max_memory }
     }
 }
@@ -614,13 +543,28 @@ impl wasmtime::ResourceLimiter for StoreLimiter {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
+    use eryx_vfs::{DirPerms, FilePerms, InMemoryStorage};
 
-    #[tokio::test]
-    async fn test_component_execute_echo() {
+    async fn create_test_instance() -> ShellInstance<InMemoryStorage> {
         let executor = ComponentShellExecutor::embedded().expect("Failed to create executor");
         let limits = ResourceLimits::default();
 
-        let result = executor
+        let storage = Arc::new(InMemoryStorage::new());
+        let mut hybrid_ctx = HybridVfsCtx::new(storage);
+        hybrid_ctx.add_vfs_preopen("/scratch", DirPerms::all(), FilePerms::all());
+
+        executor
+            .create_instance(&limits, hybrid_ctx, None)
+            .await
+            .expect("Failed to create instance")
+    }
+
+    #[tokio::test]
+    async fn test_shell_instance_echo() {
+        let mut instance = create_test_instance().await;
+        let limits = ResourceLimits::default();
+
+        let result = instance
             .execute("echo hello", &limits)
             .await
             .expect("execute failed");
@@ -636,68 +580,149 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_component_execute_variable() {
-        let executor = ComponentShellExecutor::embedded().expect("Failed to create executor");
+    async fn test_shell_instance_variable_persistence() {
+        let mut instance = create_test_instance().await;
         let limits = ResourceLimits::default();
 
-        let result = executor
-            .execute("x=world; echo hello $x", &limits)
+        // Set a variable
+        let result = instance
+            .execute("x=42", &limits)
             .await
             .expect("execute failed");
+        assert_eq!(result.exit_code, 0);
 
-        assert_eq!(
-            result.exit_code,
-            0,
-            "stderr: {}",
-            String::from_utf8_lossy(&result.stderr)
+        // Variable should persist to next call
+        let result = instance
+            .execute("echo $x", &limits)
+            .await
+            .expect("execute failed");
+        assert_eq!(result.exit_code, 0);
+        let stdout = String::from_utf8_lossy(&result.stdout);
+        assert!(
+            stdout.contains("42"),
+            "stdout should contain 42: {:?}",
+            stdout
         );
     }
 
     #[tokio::test]
-    async fn test_component_execute_false() {
-        let executor = ComponentShellExecutor::embedded().expect("Failed to create executor");
+    async fn test_shell_instance_function_persistence() {
+        let mut instance = create_test_instance().await;
         let limits = ResourceLimits::default();
 
-        let result = executor
+        // Define a function
+        let result = instance
+            .execute("greet() { echo \"Hello, $1!\"; }", &limits)
+            .await
+            .expect("execute failed");
+        assert_eq!(result.exit_code, 0);
+
+        // Function should persist to next call
+        let result = instance
+            .execute("greet World", &limits)
+            .await
+            .expect("execute failed");
+        assert_eq!(result.exit_code, 0);
+        let stdout = String::from_utf8_lossy(&result.stdout);
+        assert!(
+            stdout.contains("Hello, World!"),
+            "stdout should contain greeting: {:?}",
+            stdout
+        );
+    }
+
+    #[tokio::test]
+    async fn test_shell_instance_get_set_var() {
+        let mut instance = create_test_instance().await;
+
+        // Set via API
+        instance
+            .set_var("myvar", "myvalue")
+            .await
+            .expect("set_var failed");
+
+        // Get via API
+        let value = instance.get_var("myvar").await.expect("get_var failed");
+        assert_eq!(value, Some("myvalue".to_string()));
+
+        // Should also be visible in shell
+        let limits = ResourceLimits::default();
+        let result = instance
+            .execute("echo $myvar", &limits)
+            .await
+            .expect("execute failed");
+        let stdout = String::from_utf8_lossy(&result.stdout);
+        assert!(stdout.contains("myvalue"), "stdout: {:?}", stdout);
+    }
+
+    #[tokio::test]
+    async fn test_shell_instance_isolation() {
+        // Create two separate instances
+        let mut instance1 = create_test_instance().await;
+        let mut instance2 = create_test_instance().await;
+        let limits = ResourceLimits::default();
+
+        // Set variable in instance1
+        instance1
+            .execute("x=from_instance1", &limits)
+            .await
+            .expect("execute failed");
+
+        // Set different variable in instance2
+        instance2
+            .execute("x=from_instance2", &limits)
+            .await
+            .expect("execute failed");
+
+        // Each instance should see its own value
+        let result1 = instance1
+            .execute("echo $x", &limits)
+            .await
+            .expect("execute failed");
+        let stdout1 = String::from_utf8_lossy(&result1.stdout);
+        assert!(
+            stdout1.contains("from_instance1"),
+            "instance1 stdout: {:?}",
+            stdout1
+        );
+
+        let result2 = instance2
+            .execute("echo $x", &limits)
+            .await
+            .expect("execute failed");
+        let stdout2 = String::from_utf8_lossy(&result2.stdout);
+        assert!(
+            stdout2.contains("from_instance2"),
+            "instance2 stdout: {:?}",
+            stdout2
+        );
+    }
+
+    #[tokio::test]
+    async fn test_shell_instance_last_exit_code() {
+        let mut instance = create_test_instance().await;
+        let limits = ResourceLimits::default();
+
+        // Run a successful command
+        instance
+            .execute("true", &limits)
+            .await
+            .expect("execute failed");
+        let code = instance
+            .last_exit_code()
+            .await
+            .expect("last_exit_code failed");
+        assert_eq!(code, 0);
+
+        // Run a failing command
+        instance
             .execute("false", &limits)
             .await
             .expect("execute failed");
-
-        assert_eq!(result.exit_code, 1);
-    }
-
-    #[tokio::test]
-    async fn test_multiple_executions_reuse_instance_pre() {
-        let executor = ComponentShellExecutor::embedded().expect("Failed to create executor");
-        let limits = ResourceLimits::default();
-
-        // Execute multiple scripts - each should get fresh state
-        for i in 0..3 {
-            let result = executor
-                .execute(&format!("echo run {}", i), &limits)
-                .await
-                .expect("execute failed");
-            assert_eq!(result.exit_code, 0);
-        }
-    }
-
-    #[tokio::test]
-    async fn test_executor_is_clone() {
-        let executor = ComponentShellExecutor::embedded().expect("Failed to create executor");
-        let executor2 = executor.clone();
-        let limits = ResourceLimits::default();
-
-        // Both executors should work independently
-        let result1 = executor
-            .execute("echo one", &limits)
+        let code = instance
+            .last_exit_code()
             .await
-            .expect("execute failed");
-        let result2 = executor2
-            .execute("echo two", &limits)
-            .await
-            .expect("execute failed");
-
-        assert_eq!(result1.exit_code, 0);
-        assert_eq!(result2.exit_code, 0);
+            .expect("last_exit_code failed");
+        assert_eq!(code, 1);
     }
 }

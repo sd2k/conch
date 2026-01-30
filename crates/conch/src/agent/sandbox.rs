@@ -124,7 +124,7 @@ struct WorkspaceMount {
 /// use conch::agent::{AgentSandbox, ToolDefinition};
 /// use serde_json::json;
 ///
-/// let sandbox = AgentSandbox::builder("agent-123")
+/// let mut sandbox = AgentSandbox::builder("agent-123")
 ///     .name("code-reviewer")
 ///     .parent("agent-root")
 ///     .params(json!({"task": "review PR #42"}))
@@ -268,7 +268,7 @@ impl AgentSandboxBuilder {
     /// use conch::policy::{PolicyBuilder, agent_sandbox_policy};
     ///
     /// // Use the standard agent sandbox policy
-    /// let sandbox = AgentSandbox::builder("agent-123")
+    /// let mut sandbox = AgentSandbox::builder("agent-123")
     ///     .policy(agent_sandbox_policy())
     ///     .build()
     ///     .await?;
@@ -280,7 +280,7 @@ impl AgentSandboxBuilder {
     ///     .allow_write("/agent/scratch/**")
     ///     .build();
     ///
-    /// let sandbox = AgentSandbox::builder("agent-123")
+    /// let mut sandbox = AgentSandbox::builder("agent-123")
     ///     .policy(policy)
     ///     .build()
     ///     .await?;
@@ -308,7 +308,7 @@ impl AgentSandboxBuilder {
     /// ```rust,ignore
     /// use conch::{ToolRequest, ToolResult};
     ///
-    /// let sandbox = AgentSandbox::builder("agent-123")
+    /// let mut sandbox = AgentSandbox::builder("agent-123")
     ///     .tool(ToolDefinition::no_params("web_search", "Search the web"))
     ///     .tool_handler(|req: ToolRequest| async move {
     ///         match req.tool.as_str() {
@@ -407,7 +407,7 @@ impl AgentSandboxBuilder {
             shell_builder = shell_builder.tool_handler(AgentToolHandlerWrapper { inner: handler });
         }
 
-        let shell = shell_builder.build()?;
+        let shell = shell_builder.build().await?;
 
         Ok(AgentSandbox {
             shell,
@@ -446,7 +446,7 @@ impl AgentSandboxBuilder {
 /// # Example
 ///
 /// ```rust,ignore
-/// let sandbox = AgentSandbox::builder("agent-123")
+/// let mut sandbox = AgentSandbox::builder("agent-123")
 ///     .params(json!({"task": "analyze code"}))
 ///     .build()
 ///     .await?;
@@ -511,7 +511,7 @@ impl AgentSandbox {
     /// assert_eq!(result.exit_code, 0);
     /// ```
     pub async fn execute(
-        &self,
+        &mut self,
         script: &str,
         limits: &ResourceLimits,
     ) -> Result<ExecutionResult, RuntimeError> {
@@ -530,7 +530,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sandbox_creation() {
-        let sandbox = AgentSandbox::builder("agent-123")
+        let mut sandbox = AgentSandbox::builder("agent-123")
             .build()
             .await
             .expect("Failed to build sandbox");
@@ -540,7 +540,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sandbox_with_name_and_parent() {
-        let sandbox = AgentSandbox::builder("agent-123")
+        let mut sandbox = AgentSandbox::builder("agent-123")
             .name("test-agent")
             .parent("parent-456")
             .build()
@@ -561,7 +561,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sandbox_execute_basic() {
-        let sandbox = AgentSandbox::builder("agent-123")
+        let mut sandbox = AgentSandbox::builder("agent-123")
             .build()
             .await
             .expect("Failed to build sandbox");
@@ -577,7 +577,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sandbox_read_metadata() {
-        let sandbox = AgentSandbox::builder("agent-123")
+        let mut sandbox = AgentSandbox::builder("agent-123")
             .params(serde_json::json!({"task": "test task"}))
             .build()
             .await
@@ -596,7 +596,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sandbox_write_to_scratch() {
-        let sandbox = AgentSandbox::builder("agent-123")
+        let mut sandbox = AgentSandbox::builder("agent-123")
             .build()
             .await
             .expect("Failed to build sandbox");
@@ -627,7 +627,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sandbox_tools_readable() {
-        let sandbox = AgentSandbox::builder("agent-123")
+        let mut sandbox = AgentSandbox::builder("agent-123")
             .tool(ToolDefinition::new(
                 "web_search",
                 "Search the web",
@@ -656,7 +656,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sandbox_grep_tools() {
-        let sandbox = AgentSandbox::builder("agent-123")
+        let mut sandbox = AgentSandbox::builder("agent-123")
             .tool(ToolDefinition::no_params(
                 "web_search",
                 "Search the web for information",
@@ -708,7 +708,7 @@ mod tests {
             }
         };
 
-        let sandbox = AgentSandbox::builder("agent-123")
+        let mut sandbox = AgentSandbox::builder("agent-123")
             .tool(ToolDefinition::no_params("web_search", "Search the web"))
             .tool_handler(handler)
             .build()
@@ -761,7 +761,7 @@ mod tests {
                 tool_call_count: 0,
             });
 
-        let sandbox = AgentSandbox::builder("agent-123")
+        let mut sandbox = AgentSandbox::builder("agent-123")
             .history(Arc::new(history))
             .build()
             .await
@@ -809,7 +809,7 @@ mod tests {
                 None,
             );
 
-        let sandbox = AgentSandbox::builder("agent-123")
+        let mut sandbox = AgentSandbox::builder("agent-123")
             .history(Arc::new(history))
             .build()
             .await
@@ -848,7 +848,7 @@ A> Based on the search results, here's what I found about Rust async patterns...
 
         let history = SimpleHistoryProvider::new().with_transcript(transcript);
 
-        let sandbox = AgentSandbox::builder("agent-123")
+        let mut sandbox = AgentSandbox::builder("agent-123")
             .history(Arc::new(history))
             .build()
             .await
@@ -876,7 +876,7 @@ A> Based on the search results, here's what I found about Rust async patterns...
         #[tokio::test]
         async fn test_sandbox_with_policy_allows_agent_reads() {
             // Use the standard agent sandbox policy
-            let sandbox = AgentSandbox::builder("agent-123")
+            let mut sandbox = AgentSandbox::builder("agent-123")
                 .policy(agent_sandbox_policy())
                 .build()
                 .await
@@ -898,7 +898,7 @@ A> Based on the search results, here's what I found about Rust async patterns...
 
         #[tokio::test]
         async fn test_sandbox_with_policy_allows_tools_reads() {
-            let sandbox = AgentSandbox::builder("agent-123")
+            let mut sandbox = AgentSandbox::builder("agent-123")
                 .tool(ToolDefinition::no_params("test_tool", "A test tool"))
                 .policy(agent_sandbox_policy())
                 .build()
@@ -922,7 +922,7 @@ A> Based on the search results, here's what I found about Rust async patterns...
 
         #[tokio::test]
         async fn test_sandbox_with_policy_allows_scratch_writes() {
-            let sandbox = AgentSandbox::builder("agent-123")
+            let mut sandbox = AgentSandbox::builder("agent-123")
                 .policy(agent_sandbox_policy())
                 .build()
                 .await
@@ -954,7 +954,7 @@ A> Based on the search results, here's what I found about Rust async patterns...
 
         #[tokio::test]
         async fn test_sandbox_with_policy_denies_write_to_agent_root() {
-            let sandbox = AgentSandbox::builder("agent-123")
+            let mut sandbox = AgentSandbox::builder("agent-123")
                 .policy(agent_sandbox_policy())
                 .build()
                 .await
@@ -981,7 +981,7 @@ A> Based on the search results, here's what I found about Rust async patterns...
                 .allow_read("/agent")
                 .build();
 
-            let sandbox = AgentSandbox::builder("agent-123")
+            let mut sandbox = AgentSandbox::builder("agent-123")
                 .params(serde_json::json!({"task": "test"}))
                 .policy(policy)
                 .build()
@@ -1014,7 +1014,7 @@ A> Based on the search results, here's what I found about Rust async patterns...
         #[tokio::test]
         async fn test_sandbox_without_policy_allows_everything() {
             // No policy = allow all (backward compatible)
-            let sandbox = AgentSandbox::builder("agent-123")
+            let mut sandbox = AgentSandbox::builder("agent-123")
                 .build()
                 .await
                 .expect("Failed to build sandbox");
@@ -1034,7 +1034,7 @@ A> Based on the search results, here's what I found about Rust async patterns...
 
         #[tokio::test]
         async fn test_policy_shared_across_invocations() {
-            let sandbox = AgentSandbox::builder("agent-123")
+            let mut sandbox = AgentSandbox::builder("agent-123")
                 .policy(agent_sandbox_policy())
                 .build()
                 .await

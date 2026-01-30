@@ -3,19 +3,19 @@
 #[cfg(all(test, feature = "embedded-shell"))]
 #[allow(clippy::expect_used)]
 mod embedded_tests {
-    use crate::executor::ComponentShellExecutor;
     use crate::limits::ResourceLimits;
+    use crate::runtime::Conch;
 
-    fn executor() -> ComponentShellExecutor {
-        ComponentShellExecutor::embedded().expect("Failed to create embedded executor")
+    fn conch() -> Conch {
+        Conch::embedded(1).expect("Failed to create embedded Conch")
     }
 
     #[tokio::test]
     async fn test_echo() {
-        let exec = executor();
+        let conch = conch();
         let limits = ResourceLimits::default();
-        let result = exec
-            .execute("echo hello", &limits)
+        let result = conch
+            .execute("echo hello", limits)
             .await
             .expect("execute failed");
 
@@ -31,10 +31,10 @@ mod embedded_tests {
 
     #[tokio::test]
     async fn test_simple_pipe() {
-        let exec = executor();
+        let conch = conch();
         let limits = ResourceLimits::default();
-        let result = exec
-            .execute("echo hello | cat", &limits)
+        let result = conch
+            .execute("echo hello | cat", limits)
             .await
             .expect("execute failed");
 
@@ -50,11 +50,11 @@ mod embedded_tests {
 
     #[tokio::test]
     async fn test_cat_builtin() {
-        let exec = executor();
+        let conch = conch();
         let limits = ResourceLimits::default();
 
-        let result = exec
-            .execute("echo 'line1' | cat", &limits)
+        let result = conch
+            .execute("echo 'line1' | cat", limits)
             .await
             .expect("execute failed");
         assert_eq!(
@@ -69,11 +69,11 @@ mod embedded_tests {
 
     #[tokio::test]
     async fn test_wc_builtin() {
-        let exec = executor();
+        let conch = conch();
         let limits = ResourceLimits::default();
 
-        let result = exec
-            .execute("echo hello | wc -c", &limits)
+        let result = conch
+            .execute("echo hello | wc -c", limits)
             .await
             .expect("execute failed");
         assert_eq!(
@@ -86,11 +86,11 @@ mod embedded_tests {
 
     #[tokio::test]
     async fn test_grep_builtin() {
-        let exec = executor();
+        let conch = conch();
         let limits = ResourceLimits::default();
 
-        let result = exec
-            .execute("echo bar | grep bar", &limits)
+        let result = conch
+            .execute("echo bar | grep bar", limits)
             .await
             .expect("execute failed");
         assert_eq!(
@@ -103,11 +103,11 @@ mod embedded_tests {
 
     #[tokio::test]
     async fn test_jq_builtin() {
-        let exec = executor();
+        let conch = conch();
         let limits = ResourceLimits::default();
 
-        let result = exec
-            .execute(r#"echo '{"name":"test"}' | jq '.name'"#, &limits)
+        let result = conch
+            .execute(r#"echo '{"name":"test"}' | jq '.name'"#, limits)
             .await
             .expect("execute failed");
         assert_eq!(
@@ -120,11 +120,11 @@ mod embedded_tests {
 
     #[tokio::test]
     async fn test_head_lines() {
-        let exec = executor();
+        let conch = conch();
         let limits = ResourceLimits::default();
 
-        let result = exec
-            .execute(r#"echo "hello world" | head -n 1"#, &limits)
+        let result = conch
+            .execute(r#"echo "hello world" | head -n 1"#, limits)
             .await
             .expect("execute failed");
 
@@ -140,11 +140,11 @@ mod embedded_tests {
 
     #[tokio::test]
     async fn test_head_bytes() {
-        let exec = executor();
+        let conch = conch();
         let limits = ResourceLimits::default();
 
-        let result = exec
-            .execute(r#"echo "hello world" | head -c 5"#, &limits)
+        let result = conch
+            .execute(r#"echo "hello world" | head -c 5"#, limits)
             .await
             .expect("execute failed");
 
@@ -160,11 +160,11 @@ mod embedded_tests {
 
     #[tokio::test]
     async fn test_tail_bytes() {
-        let exec = executor();
+        let conch = conch();
         let limits = ResourceLimits::default();
 
-        let result = exec
-            .execute(r#"echo -n "hello world" | tail -c 5"#, &limits)
+        let result = conch
+            .execute(r#"echo -n "hello world" | tail -c 5"#, limits)
             .await
             .expect("execute failed");
 

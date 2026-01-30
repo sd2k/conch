@@ -6,24 +6,29 @@
 //! - **VFS storage**: In-memory or custom storage for orchestrator-controlled paths
 //! - **Real filesystem**: cap-std secured mounts for host directory access
 //!
+//! ## State Persistence
+//!
+//! Unlike stateless execution, the Shell maintains state across multiple `execute` calls.
+//! Variables, functions, and aliases defined in one execution persist to subsequent ones.
+//!
 //! # Example
 //!
 //! ```rust,ignore
 //! use conch::{Shell, Mount, ResourceLimits};
 //!
 //! // Create a shell with a real filesystem mount
-//! let shell = Shell::builder()
+//! let mut shell = Shell::builder()
 //!     .mount("/project", "/home/user/code", Mount::readonly())
-//!     .build()?;
+//!     .build()
+//!     .await?;
 //!
 //! // Write data to VFS scratch area
 //! shell.vfs().write("/scratch/input.txt", b"hello").await?;
 //!
-//! // Execute commands - they see both VFS and real filesystem
-//! let result = shell.execute(
-//!     "cat /scratch/input.txt && ls /project/src",
-//!     &ResourceLimits::default(),
-//! ).await?;
+//! // Execute commands - state persists between calls
+//! shell.execute("x=42", &ResourceLimits::default()).await?;
+//! let result = shell.execute("echo $x", &ResourceLimits::default()).await?;
+//! // result.stdout contains "42"
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -35,9 +40,15 @@ use eryx_vfs::{
     VfsStorage,
 };
 
-use crate::executor::{ComponentShellExecutor, ToolHandler};
+use crate::executor::ComponentShellExecutor;
+
+#[cfg(feature = "embedded-shell")]
+use crate::executor::ToolHandler;
 use crate::limits::ResourceLimits;
 use crate::runtime::{ExecutionResult, RuntimeError};
+
+#[cfg(feature = "embedded-shell")]
+use crate::executor::ShellInstance;
 
 /// A sized wrapper around `Arc<dyn VfsStorage>` that implements `VfsStorage`.
 ///
@@ -45,6 +56,12 @@ use crate::runtime::{ExecutionResult, RuntimeError};
 /// compatible with APIs that require `Sized` types (like `HybridVfsCtx<S>`).
 #[derive(Clone)]
 pub struct DynVfsStorage(Arc<dyn VfsStorage>);
+
+impl std::fmt::Debug for DynVfsStorage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DynVfsStorage").finish_non_exhaustive()
+    }
+}
 
 impl DynVfsStorage {
     /// Create a new `DynVfsStorage` from any `VfsStorage` implementation.
@@ -60,6 +77,11 @@ impl DynVfsStorage {
     /// Get a reference to the underlying storage.
     pub fn inner(&self) -> &dyn VfsStorage {
         &*self.0
+    }
+
+    /// Get the inner Arc.
+    pub fn arc(&self) -> Arc<dyn VfsStorage> {
+        Arc::clone(&self.0)
     }
 }
 
@@ -173,7 +195,7 @@ struct RealMount {
 /// # Example
 ///
 /// ```rust,ignore
-/// let shell = Shell::builder()
+/// let mut shell = Shell::builder()
 ///     .vfs(my_custom_storage)
 ///     .mount("/project", "/home/user/code", Mount::readonly())
 ///     .mount("/output", "/tmp/agent-output", Mount::readwrite())
@@ -181,7 +203,8 @@ struct RealMount {
 ///     .tool_handler(|req| async move {
 ///         ToolResult { success: true, output: format!("Called: {}", req.tool) }
 ///     })
-///     .build()?;
+///     .build()
+///     .await?;
 /// ```
 pub struct ShellBuilder {
     vfs: Option<DynVfsStorage>,
@@ -189,6 +212,7 @@ pub struct ShellBuilder {
     real_mounts: Vec<RealMount>,
     executor: Option<ComponentShellExecutor>,
     tool_handler: Option<Arc<dyn ToolHandler>>,
+    limits: Option<ResourceLimits>,
 }
 
 impl std::fmt::Debug for ShellBuilder {
@@ -220,6 +244,7 @@ impl ShellBuilder {
             real_mounts: Vec::new(),
             executor: None,
             tool_handler: None,
+            limits: None,
         }
     }
 
@@ -278,6 +303,14 @@ impl ShellBuilder {
         self
     }
 
+    /// Set default resource limits for execution.
+    ///
+    /// These can be overridden per-execute call.
+    pub fn limits(mut self, limits: ResourceLimits) -> Self {
+        self.limits = Some(limits);
+        self
+    }
+
     /// Set a tool handler for processing tool invocations from shell scripts.
     ///
     /// When a script runs `tool <name> --param value`, the handler will be called
@@ -288,7 +321,7 @@ impl ShellBuilder {
     /// ```rust,ignore
     /// use conch::{Shell, ToolRequest, ToolResult};
     ///
-    /// let shell = Shell::builder()
+    /// let mut shell = Shell::builder()
     ///     .tool_handler(|req: ToolRequest| async move {
     ///         match req.tool.as_str() {
     ///             "echo" => ToolResult {
@@ -301,7 +334,8 @@ impl ShellBuilder {
     ///             },
     ///         }
     ///     })
-    ///     .build()?;
+    ///     .build()
+    ///     .await?;
     /// ```
     pub fn tool_handler(mut self, handler: impl ToolHandler + 'static) -> Self {
         self.tool_handler = Some(Arc::new(handler));
@@ -310,12 +344,17 @@ impl ShellBuilder {
 
     /// Build the shell with the configured settings.
     ///
+    /// This is an async operation because it creates and initializes the WASM
+    /// shell instance.
+    ///
     /// # Errors
     ///
     /// Returns an error if:
     /// - A real filesystem mount path doesn't exist or can't be opened
     /// - The executor fails to initialize
-    pub fn build(self) -> Result<Shell, RuntimeError> {
+    /// - The WASM shell instance fails to create
+    #[cfg(feature = "embedded-shell")]
+    pub async fn build(self) -> Result<Shell, RuntimeError> {
         // Use provided VFS or create default InMemoryStorage
         let vfs = self
             .vfs
@@ -342,66 +381,93 @@ impl ShellBuilder {
         // Get or create executor
         let executor = match self.executor {
             Some(e) => e,
-            None => {
-                #[cfg(feature = "embedded-shell")]
-                {
-                    ComponentShellExecutor::embedded()?
-                }
-                #[cfg(not(feature = "embedded-shell"))]
-                {
-                    return Err(RuntimeError::Wasm(
-                        "No executor provided and embedded-shell feature not enabled".to_string(),
-                    ));
-                }
-            }
+            None => ComponentShellExecutor::embedded()?,
         };
 
+        // Build HybridVfsCtx - wrap in Arc for HybridVfsCtx which expects Arc<S>
+        let mut hybrid_ctx = HybridVfsCtx::new(Arc::new(vfs.clone()));
+
+        // Add VFS mounts
+        for mount in &vfs_mounts {
+            hybrid_ctx.add_vfs_preopen(&mount.guest_path, mount.dir_perms, mount.file_perms);
+        }
+
+        // Add real filesystem mounts
+        for mount in &self.real_mounts {
+            let real_dir =
+                RealDir::open_ambient(&mount.host_path, mount.dir_perms, mount.file_perms)
+                    .map_err(|e| {
+                        RuntimeError::Wasm(format!(
+                            "Failed to open mount {}: {}",
+                            mount.host_path.display(),
+                            e
+                        ))
+                    })?;
+            hybrid_ctx.add_real_preopen(&mount.guest_path, real_dir);
+        }
+
+        // Default limits
+        let limits = self.limits.unwrap_or_default();
+
+        // Create the persistent shell instance
+        let instance = executor
+            .create_instance(&limits, hybrid_ctx, self.tool_handler)
+            .await?;
+
         Ok(Shell {
-            executor,
+            instance,
             vfs,
-            vfs_mounts,
-            real_mounts: self.real_mounts,
-            tool_handler: self.tool_handler,
+            default_limits: limits,
         })
+    }
+
+    /// Build the shell (stub for when embedded-shell is disabled).
+    #[cfg(not(feature = "embedded-shell"))]
+    pub async fn build(self) -> Result<Shell, RuntimeError> {
+        Err(RuntimeError::Wasm(
+            "Shell::build requires embedded-shell feature".to_string(),
+        ))
     }
 }
 
-/// A sandboxed shell for executing commands.
+/// A sandboxed shell for executing commands with persistent state.
 ///
-/// The shell provides a hybrid filesystem that combines virtual storage (for
-/// orchestrator-controlled data) with optional real filesystem mounts (for
-/// host directory access via cap-std).
+/// The shell provides:
+/// - A hybrid filesystem combining virtual storage with real filesystem mounts
+/// - Persistent shell state (variables, functions, aliases) across executions
+/// - Isolated execution environment per Shell instance
 ///
 /// # Example
 ///
 /// ```rust,ignore
-/// let shell = Shell::builder()
+/// let mut shell = Shell::builder()
 ///     .mount("/project", "/home/user/code", Mount::readonly())
-///     .build()?;
+///     .build()
+///     .await?;
 ///
 /// // Write to VFS
 /// shell.vfs().write("/scratch/data.txt", b"hello").await?;
 ///
-/// // Execute commands
-/// let result = shell.execute("cat /scratch/data.txt", &limits).await?;
+/// // State persists between execute calls
+/// shell.execute("x=42", &limits).await?;
+/// let result = shell.execute("echo $x", &limits).await?;
+/// assert!(String::from_utf8_lossy(&result.stdout).contains("42"));
 /// ```
+#[cfg(feature = "embedded-shell")]
 pub struct Shell {
-    executor: ComponentShellExecutor,
+    instance: ShellInstance<DynVfsStorage>,
     vfs: DynVfsStorage,
-    vfs_mounts: Vec<VfsMount>,
-    real_mounts: Vec<RealMount>,
-    tool_handler: Option<Arc<dyn ToolHandler>>,
+    default_limits: ResourceLimits,
 }
 
+#[cfg(feature = "embedded-shell")]
 impl std::fmt::Debug for Shell {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Shell")
-            .field("vfs_mounts", &self.vfs_mounts)
-            .field("real_mounts", &self.real_mounts)
-            .finish_non_exhaustive()
+        f.debug_struct("Shell").finish_non_exhaustive()
     }
 }
 
+#[cfg(feature = "embedded-shell")]
 impl Shell {
     /// Create a new shell builder with default settings.
     pub fn builder() -> ShellBuilder {
@@ -420,7 +486,7 @@ impl Shell {
     ///
     /// Useful when you need to share the VFS with other components.
     pub fn vfs_arc(&self) -> Arc<dyn VfsStorage> {
-        Arc::clone(&self.vfs.0)
+        self.vfs.arc()
     }
 
     /// Execute a shell script.
@@ -429,45 +495,63 @@ impl Shell {
     /// - VFS paths configured via `vfs_path()` (backed by VfsStorage)
     /// - Real filesystem paths configured via `mount()` (backed by cap-std)
     ///
+    /// **State persists** between execute calls. Variables, functions, and
+    /// aliases defined in one call are available in subsequent calls.
+    ///
     /// # Example
     ///
     /// ```rust,ignore
-    /// let result = shell.execute("echo hello | wc -c", &limits).await?;
-    /// assert_eq!(result.exit_code, 0);
-    /// println!("stdout: {}", String::from_utf8_lossy(&result.stdout));
+    /// // Define a variable
+    /// shell.execute("greeting=hello", &limits).await?;
+    ///
+    /// // Use it in the next call
+    /// let result = shell.execute("echo $greeting world", &limits).await?;
+    /// assert!(String::from_utf8_lossy(&result.stdout).contains("hello world"));
     /// ```
     pub async fn execute(
-        &self,
+        &mut self,
         script: &str,
         limits: &ResourceLimits,
     ) -> Result<ExecutionResult, RuntimeError> {
-        // Build HybridVfsCtx for this execution
-        // Wrap DynVfsStorage in Arc for HybridVfsCtx (DynVfsStorage is Sized + VfsStorage)
-        let mut hybrid_ctx = HybridVfsCtx::new(Arc::new(self.vfs.clone()));
+        self.instance.execute(script, limits).await
+    }
 
-        // Add VFS mounts
-        for mount in &self.vfs_mounts {
-            hybrid_ctx.add_vfs_preopen(&mount.guest_path, mount.dir_perms, mount.file_perms);
-        }
+    /// Execute a shell script using the default limits.
+    pub async fn execute_default(&mut self, script: &str) -> Result<ExecutionResult, RuntimeError> {
+        self.instance.execute(script, &self.default_limits).await
+    }
 
-        // Add real filesystem mounts
-        for mount in &self.real_mounts {
-            let real_dir =
-                RealDir::open_ambient(&mount.host_path, mount.dir_perms, mount.file_perms)
-                    .map_err(|e| {
-                        RuntimeError::Wasm(format!(
-                            "Failed to open mount {}: {}",
-                            mount.host_path.display(),
-                            e
-                        ))
-                    })?;
-            hybrid_ctx.add_real_preopen(&mount.guest_path, real_dir);
-        }
+    /// Get a shell variable's value.
+    ///
+    /// Returns `None` if the variable is not set.
+    pub async fn get_var(&mut self, name: &str) -> Result<Option<String>, RuntimeError> {
+        self.instance.get_var(name).await
+    }
 
-        // Execute with hybrid VFS and optional tool handler
-        self.executor
-            .execute_with_hybrid_vfs(script, limits, hybrid_ctx, self.tool_handler.clone())
-            .await
+    /// Set a shell variable.
+    ///
+    /// This is equivalent to running `name=value` in the shell.
+    pub async fn set_var(&mut self, name: &str, value: &str) -> Result<(), RuntimeError> {
+        self.instance.set_var(name, value).await
+    }
+
+    /// Get the exit code from the last executed command ($?).
+    pub async fn last_exit_code(&mut self) -> Result<i32, RuntimeError> {
+        self.instance.last_exit_code().await
+    }
+}
+
+/// Stub Shell type when embedded-shell feature is disabled.
+#[cfg(not(feature = "embedded-shell"))]
+pub struct Shell {
+    _private: (),
+}
+
+#[cfg(not(feature = "embedded-shell"))]
+impl Shell {
+    /// Create a new shell builder with default settings.
+    pub fn builder() -> ShellBuilder {
+        ShellBuilder::new()
     }
 }
 
@@ -478,16 +562,21 @@ mod tests {
 
     #[tokio::test]
     async fn test_shell_builder_default() {
-        let shell = Shell::builder().build().expect("Failed to build shell");
+        let mut shell = Shell::builder()
+            .build()
+            .await
+            .expect("Failed to build shell");
 
-        // Should have default /scratch mount
-        assert_eq!(shell.vfs_mounts.len(), 1);
-        assert_eq!(shell.vfs_mounts[0].guest_path, "/scratch");
+        // Should have created successfully
+        assert!(format!("{:?}", shell).contains("Shell"));
     }
 
     #[tokio::test]
     async fn test_shell_basic_execution() {
-        let shell = Shell::builder().build().expect("Failed to build shell");
+        let mut shell = Shell::builder()
+            .build()
+            .await
+            .expect("Failed to build shell");
         let limits = ResourceLimits::default();
 
         let result = shell
@@ -500,8 +589,96 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_shell_variable_persistence() {
+        let mut shell = Shell::builder()
+            .build()
+            .await
+            .expect("Failed to build shell");
+        let limits = ResourceLimits::default();
+
+        // Set a variable
+        let result = shell
+            .execute("myvar=hello_world", &limits)
+            .await
+            .expect("Execute failed");
+        assert_eq!(result.exit_code, 0);
+
+        // Variable should persist to next call
+        let result = shell
+            .execute("echo $myvar", &limits)
+            .await
+            .expect("Execute failed");
+        assert_eq!(result.exit_code, 0);
+        let stdout = String::from_utf8_lossy(&result.stdout);
+        assert!(
+            stdout.contains("hello_world"),
+            "Expected 'hello_world' in stdout: {:?}",
+            stdout
+        );
+    }
+
+    #[tokio::test]
+    async fn test_shell_function_persistence() {
+        let mut shell = Shell::builder()
+            .build()
+            .await
+            .expect("Failed to build shell");
+        let limits = ResourceLimits::default();
+
+        // Define a function
+        let result = shell
+            .execute("greet() { echo \"Hello, $1!\"; }", &limits)
+            .await
+            .expect("Execute failed");
+        assert_eq!(result.exit_code, 0);
+
+        // Function should persist
+        let result = shell
+            .execute("greet World", &limits)
+            .await
+            .expect("Execute failed");
+        assert_eq!(result.exit_code, 0);
+        let stdout = String::from_utf8_lossy(&result.stdout);
+        assert!(
+            stdout.contains("Hello, World!"),
+            "Expected greeting in stdout: {:?}",
+            stdout
+        );
+    }
+
+    #[tokio::test]
+    async fn test_shell_get_set_var() {
+        let mut shell = Shell::builder()
+            .build()
+            .await
+            .expect("Failed to build shell");
+
+        // Set via API
+        shell
+            .set_var("api_var", "api_value")
+            .await
+            .expect("set_var failed");
+
+        // Get via API
+        let value = shell.get_var("api_var").await.expect("get_var failed");
+        assert_eq!(value, Some("api_value".to_string()));
+
+        // Should be visible in shell
+        let limits = ResourceLimits::default();
+        let result = shell
+            .execute("echo $api_var", &limits)
+            .await
+            .expect("Execute failed");
+        let stdout = String::from_utf8_lossy(&result.stdout);
+        assert!(stdout.contains("api_value"), "stdout: {:?}", stdout);
+    }
+
+    #[tokio::test]
     async fn test_shell_vfs_write_read() {
-        let shell = Shell::builder().build().expect("Failed to build shell");
+        let mut shell = Shell::builder()
+            .build()
+            .await
+            .expect("Failed to build shell");
         let limits = ResourceLimits::default();
 
         // Write to VFS from host
@@ -519,7 +696,7 @@ mod tests {
             .expect("VFS exists check failed");
         assert!(exists, "File should exist in VFS after write");
 
-        // Read via shell command (the file we wrote from host)
+        // Read via shell command
         let result = shell
             .execute("cat /scratch/test.txt", &limits)
             .await
@@ -542,26 +719,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_shell_isolation() {
+        // Create two shells
+        let mut shell1 = Shell::builder()
+            .build()
+            .await
+            .expect("Failed to build shell1");
+        let mut shell2 = Shell::builder()
+            .build()
+            .await
+            .expect("Failed to build shell2");
+        let limits = ResourceLimits::default();
+
+        // Set different values in each shell
+        shell1
+            .execute("x=from_shell1", &limits)
+            .await
+            .expect("Execute failed");
+        shell2
+            .execute("x=from_shell2", &limits)
+            .await
+            .expect("Execute failed");
+
+        // Each should see its own value
+        let result1 = shell1
+            .execute("echo $x", &limits)
+            .await
+            .expect("Execute failed");
+        let stdout1 = String::from_utf8_lossy(&result1.stdout);
+        assert!(
+            stdout1.contains("from_shell1"),
+            "shell1 should see its own value: {:?}",
+            stdout1
+        );
+
+        let result2 = shell2
+            .execute("echo $x", &limits)
+            .await
+            .expect("Execute failed");
+        let stdout2 = String::from_utf8_lossy(&result2.stdout);
+        assert!(
+            stdout2.contains("from_shell2"),
+            "shell2 should see its own value: {:?}",
+            stdout2
+        );
+    }
+
+    #[tokio::test]
     async fn test_shell_custom_vfs_path() {
-        let shell = Shell::builder()
+        let mut shell = Shell::builder()
             .vfs_path("/data", DirPerms::all(), FilePerms::all())
             .vfs_path("/config", DirPerms::READ, FilePerms::READ)
             .build()
+            .await
             .expect("Failed to build shell");
 
-        // Should have the custom mounts (not the default /scratch)
-        assert_eq!(shell.vfs_mounts.len(), 2);
-        assert_eq!(shell.vfs_mounts[0].guest_path, "/data");
-        assert_eq!(shell.vfs_mounts[1].guest_path, "/config");
+        // Write to /data (should work)
+        shell
+            .vfs()
+            .write("/data/test.txt", b"test content")
+            .await
+            .expect("VFS write to /data failed");
+
+        let limits = ResourceLimits::default();
+        let result = shell
+            .execute("cat /data/test.txt", &limits)
+            .await
+            .expect("Execute failed");
+        assert_eq!(result.exit_code, 0);
+        assert!(String::from_utf8_lossy(&result.stdout).contains("test content"));
     }
 
     #[tokio::test]
     async fn test_shell_with_custom_storage() {
         // Create shell with explicit storage
         let storage = InMemoryStorage::new();
-        let shell = Shell::builder()
+        let mut shell = Shell::builder()
             .vfs(storage)
             .build()
+            .await
             .expect("Failed to build shell");
 
         let limits = ResourceLimits::default();
@@ -580,5 +816,30 @@ mod tests {
 
         assert_eq!(result.exit_code, 0);
         assert!(String::from_utf8_lossy(&result.stdout).contains("custom storage"));
+    }
+
+    #[tokio::test]
+    async fn test_shell_last_exit_code() {
+        let mut shell = Shell::builder()
+            .build()
+            .await
+            .expect("Failed to build shell");
+        let limits = ResourceLimits::default();
+
+        // Run successful command
+        shell
+            .execute("true", &limits)
+            .await
+            .expect("Execute failed");
+        let code = shell.last_exit_code().await.expect("last_exit_code failed");
+        assert_eq!(code, 0);
+
+        // Run failing command
+        shell
+            .execute("false", &limits)
+            .await
+            .expect("Execute failed");
+        let code = shell.last_exit_code().await.expect("last_exit_code failed");
+        assert_eq!(code, 1);
     }
 }

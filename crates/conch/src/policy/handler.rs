@@ -286,14 +286,14 @@ impl PolicyBuilder {
     /// itself (e.g., `/agent/**` also allows listing `/agent`).
     pub fn allow_read(mut self, pattern: &str) -> Self {
         // If pattern ends with /**, also add the base directory
-        if let Some(base) = pattern.strip_suffix("/**") {
-            if let Ok(p) = glob::Pattern::new(base) {
-                self.rules.push(PolicyRule {
-                    pattern: p,
-                    operations: Some(vec![Operation::Read, Operation::List, Operation::Stat]),
-                    allow: true,
-                });
-            }
+        if let Some(base) = pattern.strip_suffix("/**")
+            && let Ok(p) = glob::Pattern::new(base)
+        {
+            self.rules.push(PolicyRule {
+                pattern: p,
+                operations: Some(vec![Operation::Read, Operation::List, Operation::Stat]),
+                allow: true,
+            });
         }
 
         if let Ok(p) = glob::Pattern::new(pattern) {
@@ -312,20 +312,20 @@ impl PolicyBuilder {
     /// itself (e.g., `/agent/scratch/**` also allows operations on `/agent/scratch`).
     pub fn allow_write(mut self, pattern: &str) -> Self {
         // If pattern ends with /**, also add the base directory
-        if let Some(base) = pattern.strip_suffix("/**") {
-            if let Ok(p) = glob::Pattern::new(base) {
-                self.rules.push(PolicyRule {
-                    pattern: p,
-                    operations: Some(vec![
-                        Operation::Write,
-                        Operation::Delete,
-                        Operation::Mkdir,
-                        Operation::Rmdir,
-                        Operation::Rename,
-                    ]),
-                    allow: true,
-                });
-            }
+        if let Some(base) = pattern.strip_suffix("/**")
+            && let Ok(p) = glob::Pattern::new(base)
+        {
+            self.rules.push(PolicyRule {
+                pattern: p,
+                operations: Some(vec![
+                    Operation::Write,
+                    Operation::Delete,
+                    Operation::Mkdir,
+                    Operation::Rmdir,
+                    Operation::Rename,
+                ]),
+                allow: true,
+            });
         }
 
         if let Ok(p) = glob::Pattern::new(pattern) {
