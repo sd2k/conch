@@ -65,6 +65,13 @@ sources = ["crates/conch-shell/src/**/*.rs", "crates/conch-shell/Cargo.toml", "c
 outputs = ["target/wasm32-wasip2/release/conch_shell.wasm"]
 run = "cargo build -p conch-shell --target wasm32-wasip2 --release"
 
+[tasks.wasm-build-small]
+description = "Build WASM shell component (wasip2, size-optimized for JS bindings)"
+depends = ["wasm-target"]
+sources = ["crates/conch-shell/src/**/*.rs", "crates/conch-shell/Cargo.toml", "crates/conch-shell/wit/**/*.wit"]
+outputs = ["target/wasm32-wasip2/release-wasm/conch_shell.wasm"]
+run = "cargo build -p conch-shell --target wasm32-wasip2 --profile release-wasm"
+
 [tasks.build-embedded]
 description = "Build library with embedded WASM shell"
 depends = ["wasm-build"]

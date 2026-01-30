@@ -6,14 +6,23 @@ node = "24"
 # JavaScript bindings tasks (browser/Node.js via jco)
 # =============================================================================
 
+[tasks.wasm-build-small]
+description = "Build WASM shell component (wasip2, size-optimized for JS)"
+sources = ["../crates/conch-shell/src/**/*.rs", "../crates/conch-shell/Cargo.toml", "../crates/conch-shell/wit/**/*.wit"]
+outputs = ["../target/wasm32-wasip2/release-wasm/conch_shell.wasm"]
+run = """
+rustup target add wasm32-wasip2
+cargo build -p conch-shell --target wasm32-wasip2 --profile release-wasm
+"""
+
 [tasks.transpile]
 description = "Transpile WASM component to JavaScript using jco"
-depends = ["//:wasm-build"]
-sources = ["../target/wasm32-wasip2/release/conch_shell.wasm"]
+depends = ["wasm-build-small"]
+sources = ["../target/wasm32-wasip2/release-wasm/conch_shell.wasm"]
 outputs = ["conch-shell/conch-shell.js", "conch-shell/conch-shell.core.wasm"]
 run = """
 jco transpile \
-  ../target/wasm32-wasip2/release/conch_shell.wasm \
+  ../target/wasm32-wasip2/release-wasm/conch_shell.wasm \
   --name conch-shell \
   --optimize \
   --out-dir conch-shell \
@@ -22,7 +31,8 @@ jco transpile \
   --map wasi:clocks/*=./shims/clocks.js#* \
   --map wasi:filesystem/*=./shims/filesystem.js#* \
   --map wasi:io/*=./shims/io.js#* \
-  --map wasi:random/*=./shims/random.js#*
+  --map wasi:random/*=./shims/random.js#* \
+  -- --all-features
 jco types \
   --name conch-shell \
   --out-dir conch-shell \

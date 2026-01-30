@@ -81,3 +81,13 @@ cranelift-codegen.opt-level = 3
 regalloc2.opt-level = 3
 wasmtime.opt-level = 3
 wasmparser.opt-level = 3
+
+# Optimized profile for small WASM size
+# Use with: cargo build -p conch-shell --target wasm32-wasip2 --profile release-wasm
+[profile.release-wasm]
+inherits = "release"
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
