@@ -7,6 +7,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  MISE_EXPERIMENTAL: 1
 
 permissions: {}
 
@@ -19,45 +20,8 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-wasip2
+      - uses: jdx/mise-action@v2
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version-file: js/.node-version
-
-      - name: Install jco
-        run: npm install -g @bytecodealliance/jco
-
-      - name: Build WASM component
-        run: cargo build -p conch-shell --target wasm32-wasip2 --release
-
-      - name: Transpile to JavaScript
+      - name: Build and test JavaScript bindings
         working-directory: js
-        run: |
-          jco transpile \
-            --name conch-shell \
-            --optimize \
-            --out-dir conch-shell \
-            ../target/wasm32-wasip2/release/conch_shell.wasm
-          jco types \
-            --name conch-shell \
-            --out-dir conch-shell \
-            ../crates/conch-shell/wit/shell.wit
-
-      - name: Install conch-shell dependencies
-        working-directory: js/conch-shell
-        run: npm ci
-
-      - name: Install test dependencies
-        working-directory: js/testpkg
-        run: npm ci
-
-      - name: Typecheck
-        working-directory: js/testpkg
-        run: npm run typecheck
-
-      - name: Run tests
-        working-directory: js/testpkg
-        run: npm run test:ci
+        run: mise run //js:test
