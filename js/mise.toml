@@ -1,13 +1,10 @@
 [tools]
 node = "24"
+"npm:@bytecodealliance/jco" = "latest"
 
 # =============================================================================
 # JavaScript bindings tasks (browser/Node.js via jco)
 # =============================================================================
-
-[tasks.deps]
-description = "Install JavaScript tooling dependencies"
-run = "npm install -g @bytecodealliance/jco"
 
 [tasks.transpile]
 description = "Transpile WASM component to JavaScript using jco"
