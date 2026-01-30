@@ -182,11 +182,11 @@ fn output_value<SE: ShellExtensions>(
     context: &mut ExecutionContext<'_, SE>,
 ) -> Result<(), brush_core::Error> {
     // Check for raw string output
-    if opts.raw_output {
-        if let Val::Str(s, _) = val {
-            writeln!(context.stdout(), "{}", String::from_utf8_lossy(s.as_ref()))?;
-            return Ok(());
-        }
+    if opts.raw_output
+        && let Val::Str(s, _) = val
+    {
+        writeln!(context.stdout(), "{}", String::from_utf8_lossy(s.as_ref()))?;
+        return Ok(());
     }
 
     // jaq_json Val implements Display
