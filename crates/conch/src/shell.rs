@@ -562,7 +562,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_shell_builder_default() {
-        let mut shell = Shell::builder()
+        let shell = Shell::builder()
             .build()
             .await
             .expect("Failed to build shell");

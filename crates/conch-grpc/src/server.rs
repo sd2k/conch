@@ -183,28 +183,28 @@ async fn run_execution(
                                 }
 
                                 // Check if it's a tool response
-                                if let Some(ClientMsg::ToolResponse(resp)) = msg.msg {
-                                    if let Some(response_tx) = pending_tools.remove(&resp.call_id) {
-                                        let result = match resp.result {
-                                            Some(proto::tool_response::Result::ResultJson(json)) => {
-                                                ToolResult {
-                                                    success: true,
-                                                    output: json,
-                                                }
+                                if let Some(ClientMsg::ToolResponse(resp)) = msg.msg
+                                    && let Some(response_tx) = pending_tools.remove(&resp.call_id)
+                                {
+                                    let result = match resp.result {
+                                        Some(proto::tool_response::Result::ResultJson(json)) => {
+                                            ToolResult {
+                                                success: true,
+                                                output: json,
                                             }
-                                            Some(proto::tool_response::Result::Error(err)) => {
-                                                ToolResult {
-                                                    success: false,
-                                                    output: err,
-                                                }
-                                            }
-                                            None => ToolResult {
+                                        }
+                                        Some(proto::tool_response::Result::Error(err)) => {
+                                            ToolResult {
                                                 success: false,
-                                                output: "empty tool response".to_string(),
-                                            },
-                                        };
-                                        let _ = response_tx.send(result);
-                                    }
+                                                output: err,
+                                            }
+                                        }
+                                        None => ToolResult {
+                                            success: false,
+                                            output: "empty tool response".to_string(),
+                                        },
+                                    };
+                                    let _ = response_tx.send(result);
                                 }
                             }
                             Some(Err(e)) => {
@@ -246,7 +246,7 @@ async fn run_execution(
 
     // Build with the remote storage - this makes VFS calls!
     tracing::debug!("Building sandbox for agent {}", req.agent_id);
-    let sandbox = builder
+    let mut sandbox = builder
         .build_with_storage(storage)
         .await
         .map_err(|e| format!("failed to build sandbox: {}", e))?;

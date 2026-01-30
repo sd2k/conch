@@ -121,6 +121,10 @@ pub struct HybridComponentState<S: VfsStorage + 'static> {
     table: ResourceTable,
     stdout_pipe: MemoryOutputPipe,
     stderr_pipe: MemoryOutputPipe,
+    /// Position in stdout_pipe from which to read new output
+    stdout_pos: usize,
+    /// Position in stderr_pipe from which to read new output
+    stderr_pos: usize,
     limiter: StoreLimiter,
     hybrid_vfs_ctx: HybridVfsCtx<S>,
     tool_handler: Option<Arc<dyn ToolHandler>>,
@@ -148,20 +152,28 @@ impl<S: VfsStorage + 'static> HybridComponentState<S> {
             table: ResourceTable::new(),
             stdout_pipe,
             stderr_pipe,
+            stdout_pos: 0,
+            stderr_pos: 0,
             limiter: StoreLimiter::new(max_memory_bytes),
             hybrid_vfs_ctx,
             tool_handler,
         }
     }
 
-    /// Get the captured stdout contents.
-    pub fn stdout(&self) -> Vec<u8> {
-        self.stdout_pipe.contents().to_vec()
+    /// Get new stdout contents since last call and update position.
+    pub fn stdout(&mut self) -> Vec<u8> {
+        let contents = self.stdout_pipe.contents();
+        let new_output = contents[self.stdout_pos..].to_vec();
+        self.stdout_pos = contents.len();
+        new_output
     }
 
-    /// Get the captured stderr contents.
-    pub fn stderr(&self) -> Vec<u8> {
-        self.stderr_pipe.contents().to_vec()
+    /// Get new stderr contents since last call and update position.
+    pub fn stderr(&mut self) -> Vec<u8> {
+        let contents = self.stderr_pipe.contents();
+        let new_output = contents[self.stderr_pos..].to_vec();
+        self.stderr_pos = contents.len();
+        new_output
     }
 }
 
@@ -415,9 +427,10 @@ impl<S: VfsStorage + 'static> ShellInstance<S> {
         script: &str,
         limits: &ResourceLimits,
     ) -> Result<ExecutionResult, RuntimeError> {
-        // Clear previous output
-        let _ = self.store.data().stdout();
-        let _ = self.store.data().stderr();
+        // Mark the current position in output streams so we only capture new output
+        // (stdout/stderr mutably update their position trackers)
+        let _ = self.store.data_mut().stdout();
+        let _ = self.store.data_mut().stderr();
 
         // Set up epoch-based timeout
         self.store.set_epoch_deadline(limits.max_cpu_ms);
@@ -462,9 +475,9 @@ impl<S: VfsStorage + 'static> ShellInstance<S> {
             }
         };
 
-        // Get captured output
-        let stdout = self.store.data().stdout();
-        let stderr = self.store.data().stderr();
+        // Get captured output (only new output since the position markers were set)
+        let stdout = self.store.data_mut().stdout();
+        let stderr = self.store.data_mut().stderr();
 
         Ok(ExecutionResult {
             exit_code,

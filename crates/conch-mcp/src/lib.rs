@@ -20,7 +20,7 @@
 //!     },
 //! ];
 //!
-//! let server = ConchServer::new(4, mounts)?;
+//! let server = ConchServer::new(4, mounts);
 //! ```
 
 use std::path::PathBuf;
@@ -68,21 +68,19 @@ pub struct ExecuteParams {
     pub timeout_ms: Option<u64>,
 }
 
-/// MCP Server that provides sandboxed shell execution via Conch
+/// MCP Server that provides sandboxed shell execution via Conch.
+///
+/// This server creates a fresh Shell instance for each execution request,
+/// avoiding Send/Sync issues with the underlying WASI types while still
+/// supporting filesystem mounts.
+#[derive(Clone)]
 pub struct ConchServer {
-    shell: Arc<Shell>,
+    /// Mount configurations to apply to each shell instance
+    mounts: Arc<Vec<MountConfig>>,
+    /// Semaphore for concurrency limiting
     semaphore: Arc<Semaphore>,
-    mount_descriptions: Vec<String>,
-}
-
-impl Clone for ConchServer {
-    fn clone(&self) -> Self {
-        Self {
-            shell: Arc::clone(&self.shell),
-            semaphore: Arc::clone(&self.semaphore),
-            mount_descriptions: self.mount_descriptions.clone(),
-        }
-    }
+    /// Pre-computed mount descriptions for tool documentation
+    mount_descriptions: Arc<Vec<String>>,
 }
 
 impl std::fmt::Debug for ConchServer {
@@ -99,42 +97,48 @@ impl ConchServer {
     /// # Arguments
     /// * `max_concurrent` - Maximum number of concurrent shell executions
     /// * `mounts` - Filesystem directories to mount into the sandbox
-    pub fn new(
-        max_concurrent: usize,
-        mounts: Vec<MountConfig>,
-    ) -> Result<Self, conch::RuntimeError> {
+    pub fn new(max_concurrent: usize, mounts: Vec<MountConfig>) -> Self {
+        // Collect mount descriptions for the tool description
+        let mount_descriptions: Vec<String> = mounts
+            .iter()
+            .map(|mount| {
+                format!(
+                    "{} ({})",
+                    mount.guest_path,
+                    if mount.readonly {
+                        "read-only"
+                    } else {
+                        "read-write"
+                    }
+                )
+            })
+            .collect();
+
+        Self {
+            mounts: Arc::new(mounts),
+            semaphore: Arc::new(Semaphore::new(max_concurrent)),
+            mount_descriptions: Arc::new(mount_descriptions),
+        }
+    }
+
+    /// Create a new Shell instance with the configured mounts.
+    ///
+    /// Each execution gets a fresh shell to avoid state leakage and
+    /// Send/Sync issues with the underlying WASI types.
+    async fn create_shell(&self) -> Result<Shell, conch::RuntimeError> {
         let mut builder = Shell::builder();
 
-        // Collect mount descriptions for the tool description
-        let mut mount_descriptions = Vec::new();
-
         // Add configured mounts
-        for mount in &mounts {
+        for mount in self.mounts.iter() {
             let perms = if mount.readonly {
                 Mount::readonly()
             } else {
                 Mount::readwrite()
             };
             builder = builder.mount(&mount.guest_path, &mount.host_path, perms);
-
-            mount_descriptions.push(format!(
-                "{} ({})",
-                mount.guest_path,
-                if mount.readonly {
-                    "read-only"
-                } else {
-                    "read-write"
-                }
-            ));
         }
 
-        let shell = builder.build()?;
-
-        Ok(Self {
-            shell: Arc::new(shell),
-            semaphore: Arc::new(Semaphore::new(max_concurrent)),
-            mount_descriptions,
-        })
+        builder.build().await
     }
 
     /// Execute a shell command in the Conch sandbox.
@@ -146,6 +150,11 @@ impl ConchServer {
             .await
             .map_err(|_| McpError::internal_error("Semaphore closed", None))?;
 
+        // Create a fresh shell for this execution
+        let mut shell = self.create_shell().await.map_err(|e| {
+            McpError::internal_error(format!("Failed to create shell: {}", e), None)
+        })?;
+
         let limits = ResourceLimits {
             max_cpu_ms: params.max_cpu_ms.unwrap_or(5000),
             max_memory_bytes: params.max_memory_bytes.unwrap_or(64 * 1024 * 1024),
@@ -153,8 +162,7 @@ impl ConchServer {
             timeout: Duration::from_millis(params.timeout_ms.unwrap_or(30000)),
         };
 
-        let result = self
-            .shell
+        let result = shell
             .execute(&params.command, &limits)
             .await
             .map_err(|e| McpError::internal_error(format!("Execution error: {}", e), None))?;
@@ -206,7 +214,7 @@ impl ConchServer {
 
         if !self.mount_descriptions.is_empty() {
             description.push_str("\n\nAvailable filesystem mounts:\n");
-            for mount_desc in &self.mount_descriptions {
+            for mount_desc in self.mount_descriptions.iter() {
                 description.push_str(&format!("  - {}\n", mount_desc));
             }
         } else {
@@ -239,7 +247,7 @@ impl ServerHandler for ConchServer {
 
         if !self.mount_descriptions.is_empty() {
             instructions.push_str("\n\nFilesystem mounts available:\n");
-            for mount_desc in &self.mount_descriptions {
+            for mount_desc in self.mount_descriptions.iter() {
                 instructions.push_str(&format!("  - {}\n", mount_desc));
             }
         }
@@ -248,7 +256,7 @@ impl ServerHandler for ConchServer {
             protocol_version: ProtocolVersion::LATEST,
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             server_info: Implementation::from_build_env(),
-            instructions: Some(instructions.into()),
+            instructions: Some(instructions),
         }
     }
 
@@ -326,5 +334,32 @@ mod tests {
         };
         assert_eq!(mount.guest_path, "/data");
         assert!(mount.readonly);
+    }
+
+    #[test]
+    fn test_server_creation() {
+        let mounts = vec![
+            MountConfig {
+                guest_path: "/data".to_string(),
+                host_path: PathBuf::from("/tmp/data"),
+                readonly: true,
+            },
+            MountConfig {
+                guest_path: "/output".to_string(),
+                host_path: PathBuf::from("/tmp/output"),
+                readonly: false,
+            },
+        ];
+
+        let server = ConchServer::new(4, mounts);
+        assert_eq!(server.mount_descriptions.len(), 2);
+        assert!(server.mount_descriptions[0].contains("read-only"));
+        assert!(server.mount_descriptions[1].contains("read-write"));
+    }
+
+    #[test]
+    fn test_server_no_mounts() {
+        let server = ConchServer::new(2, vec![]);
+        assert!(server.mount_descriptions.is_empty());
     }
 }

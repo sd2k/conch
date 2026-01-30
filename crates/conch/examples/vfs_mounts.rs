@@ -24,13 +24,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Created temp files in: {}", temp_dir.display());
 
     // Build a shell with both VFS and real filesystem mounts
-    let shell = Shell::builder()
+    let mut shell = Shell::builder()
         // VFS paths (backed by in-memory storage)
         .vfs_path("/scratch", DirPerms::all(), FilePerms::all())
         .vfs_path("/config", DirPerms::READ, FilePerms::READ)
         // Real filesystem mount (read-only access to temp directory)
         .mount("/data", &temp_dir, Mount::readonly())
-        .build()?;
+        .build()
+        .await?;
 
     // Write some config to VFS
     shell

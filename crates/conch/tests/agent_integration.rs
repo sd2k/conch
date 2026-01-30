@@ -30,7 +30,7 @@ mod vfs_structure {
 
     #[tokio::test]
     async fn test_agent_directories_exist() {
-        let sandbox = AgentSandbox::builder("test-agent")
+        let mut sandbox = AgentSandbox::builder("test-agent")
             .build()
             .await
             .expect("build sandbox");
@@ -52,7 +52,7 @@ mod vfs_structure {
 
     #[tokio::test]
     async fn test_agent_metadata_content() {
-        let sandbox = AgentSandbox::builder("my-agent-id")
+        let mut sandbox = AgentSandbox::builder("my-agent-id")
             .name("Test Agent")
             .parent("parent-123")
             .capability("read_files")
@@ -78,7 +78,7 @@ mod vfs_structure {
 
     #[tokio::test]
     async fn test_agent_params_content() {
-        let sandbox = AgentSandbox::builder("agent-123")
+        let mut sandbox = AgentSandbox::builder("agent-123")
             .params(serde_json::json!({
                 "task": "analyze code",
                 "options": {
@@ -106,7 +106,7 @@ mod vfs_structure {
 
     #[tokio::test]
     async fn test_scratch_directory_writable() {
-        let sandbox = AgentSandbox::builder("agent-123")
+        let mut sandbox = AgentSandbox::builder("agent-123")
             .build()
             .await
             .expect("build sandbox");
@@ -131,7 +131,7 @@ mod vfs_structure {
 
     #[tokio::test]
     async fn test_state_directory_writable() {
-        let sandbox = AgentSandbox::builder("agent-123")
+        let mut sandbox = AgentSandbox::builder("agent-123")
             .build()
             .await
             .expect("build sandbox");
@@ -159,7 +159,7 @@ mod vfs_structure {
 
     #[tokio::test]
     async fn test_tools_directory_structure() {
-        let sandbox = AgentSandbox::builder("agent-123")
+        let mut sandbox = AgentSandbox::builder("agent-123")
             .tool(ToolDefinition::no_params("tool_a", "First tool"))
             .tool(ToolDefinition::no_params("tool_b", "Second tool"))
             .build()
@@ -200,7 +200,7 @@ mod tool_registry {
 
     #[tokio::test]
     async fn test_tool_definitions_available() {
-        let sandbox = AgentSandbox::builder("agent-123")
+        let mut sandbox = AgentSandbox::builder("agent-123")
             .tool(ToolDefinition::new(
                 "web_search",
                 "Search the web",
@@ -239,7 +239,7 @@ mod tool_registry {
 
     #[tokio::test]
     async fn test_multiple_tools() {
-        let sandbox = AgentSandbox::builder("agent-123")
+        let mut sandbox = AgentSandbox::builder("agent-123")
             .tool(ToolDefinition::no_params("tool_1", "First"))
             .tool(ToolDefinition::no_params("tool_2", "Second"))
             .tool(ToolDefinition::no_params("tool_3", "Third"))
@@ -263,7 +263,7 @@ mod tool_registry {
 
     #[tokio::test]
     async fn test_grep_tools() {
-        let sandbox = AgentSandbox::builder("agent-123")
+        let mut sandbox = AgentSandbox::builder("agent-123")
             .tool(ToolDefinition::no_params("web_search", "Search the web"))
             .tool(ToolDefinition::no_params("file_search", "Search files"))
             .tool(ToolDefinition::no_params("calculator", "Do math"))
@@ -286,7 +286,7 @@ mod tool_registry {
 
     #[tokio::test]
     async fn test_no_tools() {
-        let sandbox = AgentSandbox::builder("agent-123")
+        let mut sandbox = AgentSandbox::builder("agent-123")
             .build()
             .await
             .expect("build sandbox");
@@ -325,7 +325,7 @@ mod tool_execution {
             }
         };
 
-        let sandbox = AgentSandbox::builder("agent-123")
+        let mut sandbox = AgentSandbox::builder("agent-123")
             .tool(ToolDefinition::no_params("test_tool", "A test tool"))
             .tool_handler(handler)
             .build()
@@ -357,7 +357,7 @@ mod tool_execution {
             }
         };
 
-        let sandbox = AgentSandbox::builder("agent-123")
+        let mut sandbox = AgentSandbox::builder("agent-123")
             .tool(ToolDefinition::no_params("calculator", "Calculate"))
             .tool_handler(handler)
             .build()
@@ -389,7 +389,7 @@ mod tool_execution {
             }
         };
 
-        let sandbox = AgentSandbox::builder("agent-123")
+        let mut sandbox = AgentSandbox::builder("agent-123")
             .tool(ToolDefinition::no_params("my_tool", "My tool"))
             .tool_handler(handler)
             .build()
@@ -416,7 +416,7 @@ mod tool_execution {
             }
         };
 
-        let sandbox = AgentSandbox::builder("agent-123")
+        let mut sandbox = AgentSandbox::builder("agent-123")
             .tool(ToolDefinition::no_params("failing_tool", "Will fail"))
             .tool_handler(handler)
             .build()
@@ -451,7 +451,7 @@ mod tool_execution {
             }
         };
 
-        let sandbox = AgentSandbox::builder("agent-123")
+        let mut sandbox = AgentSandbox::builder("agent-123")
             .tool(ToolDefinition::no_params("tool_a", "First"))
             .tool(ToolDefinition::no_params("tool_b", "Second"))
             .tool_handler(handler)
@@ -498,7 +498,7 @@ mod tool_execution {
             }
         };
 
-        let sandbox = AgentSandbox::builder("agent-123")
+        let mut sandbox = AgentSandbox::builder("agent-123")
             .tool(ToolDefinition::no_params("complex", "Complex params"))
             .tool_handler(handler)
             .build()
@@ -522,7 +522,7 @@ mod tool_execution {
     #[tokio::test]
     async fn test_no_handler_returns_error() {
         // No tool_handler configured
-        let sandbox = AgentSandbox::builder("agent-123")
+        let mut sandbox = AgentSandbox::builder("agent-123")
             .tool(ToolDefinition::no_params("orphan_tool", "No handler"))
             .build()
             .await
@@ -564,7 +564,7 @@ A> This is a simple Rust main function that prints "Hello"."#;
 
         let history = SimpleHistoryProvider::new().with_transcript(transcript);
 
-        let sandbox = AgentSandbox::builder("agent-123")
+        let mut sandbox = AgentSandbox::builder("agent-123")
             .history(Arc::new(history))
             .build()
             .await
@@ -597,7 +597,7 @@ A> This is a simple Rust main function that prints "Hello"."#;
                 tool_call_count: 2,
             });
 
-        let sandbox = AgentSandbox::builder("agent-123")
+        let mut sandbox = AgentSandbox::builder("agent-123")
             .history(Arc::new(history))
             .build()
             .await
@@ -654,7 +654,7 @@ A> This is a simple Rust main function that prints "Hello"."#;
                 None,
             );
 
-        let sandbox = AgentSandbox::builder("agent-123")
+        let mut sandbox = AgentSandbox::builder("agent-123")
             .history(Arc::new(history))
             .build()
             .await
@@ -695,7 +695,7 @@ A> Here are async resources."#;
 
         let history = SimpleHistoryProvider::new().with_transcript(transcript);
 
-        let sandbox = AgentSandbox::builder("agent-123")
+        let mut sandbox = AgentSandbox::builder("agent-123")
             .history(Arc::new(history))
             .build()
             .await
@@ -720,7 +720,7 @@ A> Here are async resources."#;
 
     #[tokio::test]
     async fn test_no_history_provider() {
-        let sandbox = AgentSandbox::builder("agent-123")
+        let mut sandbox = AgentSandbox::builder("agent-123")
             .build()
             .await
             .expect("build sandbox");
@@ -771,7 +771,7 @@ mod agent_lifecycle {
             }
         };
 
-        let sandbox = AgentSandbox::builder("researcher-001")
+        let mut sandbox = AgentSandbox::builder("researcher-001")
             .name("Research Agent")
             .params(serde_json::json!({
                 "task": "Research Rust async patterns",
@@ -844,7 +844,7 @@ mod agent_lifecycle {
             }
         };
 
-        let sandbox = AgentSandbox::builder("analyzer-001")
+        let mut sandbox = AgentSandbox::builder("analyzer-001")
             .tool(ToolDefinition::no_params("file_read", "Read files"))
             .tool(ToolDefinition::no_params("code_search", "Search code"))
             .tool_handler(handler)
@@ -877,7 +877,7 @@ mod edge_cases {
 
     #[tokio::test]
     async fn test_empty_params() {
-        let sandbox = AgentSandbox::builder("agent-123")
+        let mut sandbox = AgentSandbox::builder("agent-123")
             .build()
             .await
             .expect("build sandbox");
@@ -895,7 +895,7 @@ mod edge_cases {
 
     #[tokio::test]
     async fn test_special_characters_in_params() {
-        let sandbox = AgentSandbox::builder("agent-123")
+        let mut sandbox = AgentSandbox::builder("agent-123")
             .params(serde_json::json!({
                 "query": "path/to/file.rs",
                 "pattern": "fn\\s+\\w+",
@@ -940,7 +940,7 @@ mod edge_cases {
             }
         };
 
-        let sandbox = AgentSandbox::builder("agent-123")
+        let mut sandbox = AgentSandbox::builder("agent-123")
             .tool(ToolDefinition::no_params("bulk_data", "Get bulk data"))
             .tool_handler(handler)
             .build()
@@ -975,7 +975,7 @@ mod edge_cases {
             }
         };
 
-        let sandbox = AgentSandbox::builder("agent-123")
+        let mut sandbox = AgentSandbox::builder("agent-123")
             .tool(ToolDefinition::no_params("no_args", "No arguments"))
             .tool_handler(handler)
             .build()
@@ -1002,7 +1002,7 @@ mod edge_cases {
             }
         };
 
-        let sandbox = AgentSandbox::builder("agent-123")
+        let mut sandbox = AgentSandbox::builder("agent-123")
             .tool(ToolDefinition::no_params("unicode", "Unicode test"))
             .tool_handler(handler)
             .build()
