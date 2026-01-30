@@ -16,12 +16,12 @@
     "*.d.ts",
     "README.md"
   ],
-  "main": "conch-shell.js",
-  "types": "conch-shell.d.ts",
+  "main": "index.js",
+  "types": "index.d.ts",
   "exports": {
     ".": {
-      "types": "./conch-shell.d.ts",
-      "default": "./conch-shell.js"
+      "types": "./index.d.ts",
+      "default": "./index.js"
     },
     "./vfs": {
       "types": "./vfs.d.ts",
@@ -34,6 +34,10 @@
     "./tool-handler": {
       "types": "./tool-handler.d.ts",
       "default": "./tool-handler.js"
+    },
+    "./low-level": {
+      "types": "./conch-shell.d.ts",
+      "default": "./conch-shell.js"
     }
   },
   "keywords": [

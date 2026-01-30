@@ -59,29 +59,72 @@ js/
 ├── conch-shell/          # Output npm package
 │   ├── package.json
 │   ├── README.md
-│   ├── conch-shell.js    # Generated JS bindings
+│   ├── index.js          # High-level Shell API
+│   ├── index.d.ts        # TypeScript types for Shell API
+│   ├── conch-shell.js    # Generated jco bindings (low-level)
 │   ├── conch-shell.d.ts  # Generated TypeScript types
 │   ├── *.wasm            # WASM core files
 │   └── interfaces/       # Generated WASI interface types
 └── testpkg/              # Integration tests
     ├── package.json
     ├── tsconfig.json
-    └── shell.test.ts
+    └── *.test.ts
 ```
 
 ## Usage
 
+### Stateful Shell (Recommended)
+
+The `Shell` class maintains state across executions - variables, functions, and aliases persist between calls:
+
+```javascript
+import { Shell } from '@bsull/conch';
+
+const shell = new Shell();
+
+// Variables persist between calls
+shell.execute('greeting="Hello"');
+shell.execute('name="World"');
+const result = shell.execute('echo "$greeting, $name!"');
+console.log(result.stdout);  // "Hello, World!\n"
+
+// Functions persist too
+shell.execute('greet() { echo "Hi, $1!"; }');
+const result2 = shell.execute('greet Alice');
+console.log(result2.stdout);  // "Hi, Alice!\n"
+
+// Direct variable access
+shell.setVar('count', '42');
+console.log(shell.getVar('count'));  // "42"
+
+// Check exit codes
+const result3 = shell.execute('false');
+console.log(result3.exitCode);  // 1
+
+// Clean up when done (optional - GC will handle it otherwise)
+shell.dispose();
+```
+
+### Stateless Execution
+
+For simple one-off commands, use the `execute()` function. Each call creates a fresh shell instance:
+
 ```javascript
 import { execute } from '@bsull/conch';
 
-// Execute a shell script (synchronous after module initialization)
-const exitCode = execute('echo "Hello from WASM!"');
-console.log('Exit code:', exitCode);
+// Execute a shell script and capture output
+const result = execute('echo "Hello from WASM!"');
+console.log('Exit code:', result.exitCode);  // 0
+console.log('Output:', result.stdout);       // "Hello from WASM!\n"
 
 // The shell supports pipes, variables, loops, etc.
-execute('for i in 1 2 3; do echo $i; done');
-execute('echo hello | cat');
-execute('x=world; echo "Hello $x"');
+const result2 = execute('for i in 1 2 3; do echo $i; done');
+console.log(result2.stdout);  // "1\n2\n3\n"
+
+// Note: state does NOT persist between calls
+execute('x=world');
+const result3 = execute('echo "Hello $x"');
+console.log(result3.stdout);  // "Hello \n" (x is not set - fresh instance!)
 ```
 
 ## Virtual Filesystem
@@ -89,7 +132,7 @@ execute('x=world; echo "Hello $x"');
 The shell operates in a virtual in-memory filesystem. You can set up and update files at any time, even after `execute()` has been called:
 
 ```javascript
-import { execute } from '@bsull/conch';
+import { Shell } from '@bsull/conch';
 import { setFileData, updateFile, deletePath, fromPaths } from '@bsull/conch/vfs';
 
 // Set up the VFS
@@ -98,12 +141,16 @@ setFileData(fromPaths({
   '/config/settings.json': '{"debug": true}'
 }));
 
-// Execute commands
-execute('cat /data/input.txt');  // prints: hello world
+const shell = new Shell();
+
+// Execute commands and capture output
+const result = shell.execute('cat /data/input.txt');
+console.log(result.stdout);  // "hello world"
 
 // Update the VFS (works even after execute() has been called)
 updateFile('/data/input.txt', 'updated content');
-execute('cat /data/input.txt');  // prints: updated content
+const result2 = shell.execute('cat /data/input.txt');
+console.log(result2.stdout);  // "updated content"
 
 // Add new files
 updateFile('/data/new-file.txt', 'new content');

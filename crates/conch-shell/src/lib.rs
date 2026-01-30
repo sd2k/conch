@@ -24,16 +24,51 @@ wit_bindgen::generate!({
 // Re-export types for use in builtins - tools interface has the invoke_tool import
 pub use conch::shell::tools::{ToolRequest, ToolResult, invoke_tool};
 
+// Global tokio runtime for the WASM component.
+//
+// Why a global runtime?
+// - brush-core is async and requires tokio
+// - WIT interfaces are synchronous, so we need block_on()
+// - Creating a runtime per-instance causes "nested runtime" panics
+//   when multiple shells exist or when tool handlers are called
+//
+// This is safe because:
+// - WASM is single-threaded (no thread safety concerns)
+// - The runtime is isolated within WASM memory (not shared with host)
+// - OnceCell ensures it's created once and reused for all calls
+//
+// Note for embedders: If you're embedding this WASM in a Rust program with
+// its own tokio runtime, that's fine - the WASM's runtime is completely
+// isolated in WASM linear memory and doesn't interact with the host runtime.
+thread_local! {
+    static RUNTIME: std::cell::OnceCell<tokio::runtime::Runtime> = const { std::cell::OnceCell::new() };
+}
+
+/// Get or create the global tokio runtime and run an async block on it.
+fn block_on<F, R>(f: F) -> R
+where
+    F: std::future::Future<Output = R>,
+{
+    RUNTIME.with(|rt| {
+        let runtime = rt.get_or_init(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("failed to create tokio runtime")
+        });
+        runtime.block_on(f)
+    })
+}
+
 /// A persistent shell instance that maintains state across executions.
 ///
-/// This struct holds the brush shell and tokio runtime, allowing variables,
-/// functions, and aliases to persist between `execute` calls.
+/// This struct holds the brush shell, allowing variables, functions, and
+/// aliases to persist between `execute` calls. All instances share a
+/// global tokio runtime to avoid nested runtime issues.
 pub struct ShellInstance {
     /// The brush shell instance. RefCell for interior mutability since
     /// wit-bindgen gives us &self, not &mut self.
     shell: RefCell<Shell>,
-    /// Tokio runtime for async operations.
-    runtime: tokio::runtime::Runtime,
     /// Last exit code from executed command.
     last_exit_code: RefCell<i32>,
 }
@@ -49,19 +84,13 @@ impl std::fmt::Debug for ShellInstance {
 impl exports::conch::shell::shell::GuestInstance for ShellInstance {
     /// Create a new shell instance with default configuration.
     fn new() -> Self {
-        // Build tokio runtime (single-threaded for WASM)
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("failed to create tokio runtime");
-
         // Get default builtins and add our custom ones
         let mut shell_builtins =
             brush_builtins::default_builtins(brush_builtins::BuiltinSet::BashMode);
         builtins::register_builtins(&mut shell_builtins);
 
-        // Create the shell (blocking on async)
-        let shell = runtime.block_on(async {
+        // Create the shell using the global runtime
+        let shell = block_on(async {
             Shell::builder()
                 .builtins(shell_builtins)
                 .build()
@@ -71,7 +100,6 @@ impl exports::conch::shell::shell::GuestInstance for ShellInstance {
 
         Self {
             shell: RefCell::new(shell),
-            runtime,
             last_exit_code: RefCell::new(0),
         }
     }
@@ -86,7 +114,7 @@ impl exports::conch::shell::shell::GuestInstance for ShellInstance {
     fn execute(&self, script: String) -> Result<i32, String> {
         let mut shell = self.shell.borrow_mut();
 
-        let result = self.runtime.block_on(async {
+        let result = block_on(async {
             let source_info = SourceInfo::default();
             let exec_params = ExecutionParameters::default();
 

@@ -10,8 +10,9 @@ describe("VFS updates after execute", () => {
       },
     });
 
-    const exitCode = execute("cat /initial.txt");
-    expect(exitCode).toBe(0);
+    const result = execute("cat /initial.txt");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("initial content");
   });
 
   it("can read files added after first execute", () => {
@@ -23,8 +24,9 @@ describe("VFS updates after execute", () => {
       },
     });
 
-    const exitCode = execute("cat /added-after.txt");
-    expect(exitCode).toBe(0);
+    const result = execute("cat /added-after.txt");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("added after first execute");
   });
 
   it("can read updated file content after execute", () => {
@@ -37,29 +39,32 @@ describe("VFS updates after execute", () => {
     });
 
     // Use grep to verify the new content
-    const exitCode = execute("grep UPDATED /initial.txt");
-    expect(exitCode).toBe(0);
+    const result = execute("grep UPDATED /initial.txt");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("UPDATED content\n");
   });
 
   it("can use updateFile helper", () => {
     updateFile("/helper-test.txt", "created via updateFile");
-    const exitCode = execute("cat /helper-test.txt");
-    expect(exitCode).toBe(0);
+    const result = execute("cat /helper-test.txt");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("created via updateFile");
   });
 
   it("can delete files via deletePath", () => {
     updateFile("/to-delete.txt", "this will be deleted");
 
     // Verify it exists
-    let exitCode = execute("cat /to-delete.txt");
-    expect(exitCode).toBe(0);
+    let result = execute("cat /to-delete.txt");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("this will be deleted");
 
     // Delete it
     const deleted = deletePath("/to-delete.txt");
     expect(deleted).toBe(true);
 
     // Verify it's gone
-    exitCode = execute("cat /to-delete.txt");
-    expect(exitCode).toBe(1); // File not found
+    result = execute("cat /to-delete.txt");
+    expect(result.exitCode).toBe(1); // File not found
   });
 });

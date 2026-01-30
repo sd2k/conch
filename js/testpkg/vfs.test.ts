@@ -23,22 +23,26 @@ describe("virtual filesystem", () => {
   });
 
   it("can read a file at root", () => {
-    const exitCode = execute("cat /hello.txt");
-    expect(exitCode).toBe(0);
+    const result = execute("cat /hello.txt");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("Hello, World!");
   });
 
   it("can read another file at root", () => {
-    const exitCode = execute("cat /goodbye.txt");
-    expect(exitCode).toBe(0);
+    const result = execute("cat /goodbye.txt");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("Goodbye!");
   });
 
   it("can read nested file", () => {
-    const exitCode = execute("cat /data/test.txt");
-    expect(exitCode).toBe(0);
+    const result = execute("cat /data/test.txt");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("nested content");
   });
 
   it("can read another nested file", () => {
-    const exitCode = execute("cat /data/numbers.txt");
-    expect(exitCode).toBe(0);
+    const result = execute("cat /data/numbers.txt");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("1\n2\n3\n");
   });
 });
