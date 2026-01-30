@@ -142,10 +142,10 @@ fn grep_reader<SE: ShellExtensions>(
             writeln!(context.stdout(), "{}", line)?;
 
             // Handle max count
-            if let Some(max) = opts.max_count {
-                if *match_count >= max {
-                    break;
-                }
+            if let Some(max) = opts.max_count
+                && *match_count >= max
+            {
+                break;
             }
         }
     }
