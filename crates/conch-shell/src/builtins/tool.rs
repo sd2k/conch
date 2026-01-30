@@ -261,7 +261,7 @@ mod tests {
         let args = vec!["tool".to_string(), "web_search".to_string()];
         let req = parse_tool_args(&args).expect("parse failed");
         assert_eq!(req.tool, "web_search");
-        assert!(req.params.as_object().map_or(false, |o| o.is_empty()));
+        assert!(req.params.as_object().is_some_and(|o| o.is_empty()));
     }
 
     #[test]
@@ -349,7 +349,7 @@ mod tests {
     #[test]
     fn test_parse_value_as_json_number() {
         assert_eq!(parse_value_as_json("42"), serde_json::json!(42));
-        assert_eq!(parse_value_as_json("3.14"), serde_json::json!(3.14));
+        assert_eq!(parse_value_as_json("3.15"), serde_json::json!(3.15));
     }
 
     #[test]
