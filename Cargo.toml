@@ -15,7 +15,7 @@ wasmtime-wasi = "41"
 wasmtime-wasi-io = "41"
 
 # VFS for WASI filesystem shadowing (from eryx project, local path for wasmtime 41 compat)
-eryx-vfs = { path = "../eryx/crates/eryx-vfs" }
+eryx-vfs = { git = "https://github.com/eryx-org/eryx", rev = "31a564b69c7877f15817b933b7d547e356305109" }
 
 # Async
 tokio = { version = "1" }
