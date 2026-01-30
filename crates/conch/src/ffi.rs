@@ -79,6 +79,25 @@ pub extern "C" fn conch_last_error() -> *const c_char {
 }
 
 // ============================================================================
+// Feature detection
+// ============================================================================
+
+/// Check if the library was built with the embedded shell module.
+///
+/// Returns 1 if embedded-shell feature is enabled, 0 otherwise.
+#[unsafe(no_mangle)]
+pub extern "C" fn conch_has_embedded_shell() -> u8 {
+    #[cfg(feature = "embedded-shell")]
+    {
+        1
+    }
+    #[cfg(not(feature = "embedded-shell"))]
+    {
+        0
+    }
+}
+
+// ============================================================================
 // Executor lifecycle
 // ============================================================================
 
@@ -119,7 +138,7 @@ pub extern "C" fn conch_executor_new_embedded() -> *mut ConchExecutor {
 /// - `path` must be a valid null-terminated C string.
 /// - The returned pointer must be freed with `conch_executor_free()`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn conch_executor_new_from_file(path: *const c_char) -> *mut ConchExecutor {
+pub unsafe extern "C" fn conch_executor_new(path: *const c_char) -> *mut ConchExecutor {
     if path.is_null() {
         set_last_error("path is null");
         return ptr::null_mut();
