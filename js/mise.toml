@@ -20,7 +20,12 @@ jco transpile \
   --name conch-shell \
   --optimize \
   --out-dir conch-shell \
-  --map invoke-tool=./tool-handler.js
+  --map invoke-tool=./tool-handler.js \
+  --map wasi:cli/*=./shims/cli.js#* \
+  --map wasi:clocks/*=./shims/clocks.js#* \
+  --map wasi:filesystem/*=./shims/filesystem.js#* \
+  --map wasi:io/*=./shims/io.js#* \
+  --map wasi:random/*=./shims/random.js#*
 jco types \
   --name conch-shell \
   --out-dir conch-shell \

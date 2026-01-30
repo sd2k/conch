@@ -5,10 +5,9 @@
  * that the shell operates in. The VFS is an in-memory filesystem that persists
  * for the lifetime of the module.
  *
- * IMPORTANT: The shell caches its filesystem preopens on first execution.
- * You must call setFileData() BEFORE any execute() calls to set up your VFS.
- * Calling setFileData() after execute() will not update the shell's view of
- * the filesystem.
+ * The VFS supports updates even after execute() has been called. This is achieved
+ * by mutating the underlying filesystem data in place rather than replacing it,
+ * which allows the WASM shell's cached references to remain valid.
  *
  * In browsers, this works automatically via the preview2-shim browser build.
  * In Node.js, you need to alias @bytecodealliance/preview2-shim/* imports to
@@ -16,14 +15,10 @@
  * globalThis.crypto which the browser shims require.
  */
 
-// Import VFS functions from the filesystem module.
-// In browsers, this resolves to the browser shim with in-memory VFS.
-// In Node.js tests, vitest aliases this to the browser shim.
-import {
-  _setFileData,
-  _getFileData,
-  _setCwd,
-} from "@bytecodealliance/preview2-shim/filesystem";
+// Import VFS functions from our filesystem shim.
+// This always uses browser implementations for consistent VFS behavior
+// in both Node.js and browsers.
+import { _setFileData, _getFileData, _setCwd } from "./shims/filesystem.js";
 
 /**
  * @typedef {Object} FileEntry
@@ -40,8 +35,66 @@ import {
  * @property {Object.<string, FileEntry|DirEntry>} dir - Root directory contents
  */
 
+// Track the root VFS data object so we can mutate it in place
+// This is the SAME object that gets passed to _setFileData and stored in the Descriptor
+let _rootData = null;
+let _initialized = false;
+
 /**
- * Initialize the virtual filesystem with the given data structure.
+ * Recursively sync target to match source by mutating target in place.
+ * This preserves object references while updating contents.
+ *
+ * @param {Object} target - The object to mutate
+ * @param {Object} source - The source data to sync from
+ */
+function syncInPlace(target, source) {
+  // Remove keys from target that don't exist in source
+  for (const key of Object.keys(target)) {
+    if (!(key in source)) {
+      delete target[key];
+    }
+  }
+
+  // Update/add keys from source
+  for (const [key, value] of Object.entries(source)) {
+    if (value === null || value === undefined) {
+      target[key] = value;
+    } else if (ArrayBuffer.isView(value)) {
+      // Typed arrays (Uint8Array, etc.) - assign directly
+      target[key] = value;
+    } else if (typeof value === "object") {
+      // Object - check if we can recurse
+      if (
+        target[key] &&
+        typeof target[key] === "object" &&
+        !ArrayBuffer.isView(target[key])
+      ) {
+        // Both are plain objects, recurse to preserve references
+        syncInPlace(target[key], value);
+      } else {
+        // Target doesn't have this key as an object, or it's a typed array
+        // We need to create a new object but then sync into it for nested structures
+        if (value.dir !== undefined || value.source !== undefined) {
+          // This is a VFS entry (file or directory)
+          target[key] = {};
+          syncInPlace(target[key], value);
+        } else {
+          target[key] = value;
+        }
+      }
+    } else {
+      // Primitive value
+      target[key] = value;
+    }
+  }
+}
+
+/**
+ * Initialize or update the virtual filesystem with the given data structure.
+ *
+ * This function can be called multiple times, even after execute() has been
+ * called. Subsequent calls will update the filesystem in place, preserving
+ * the WASM shell's references to the data.
  *
  * @param {VfsData} data - The filesystem structure
  *
@@ -57,9 +110,28 @@ import {
  *     }
  *   }
  * });
+ *
+ * // Later, update the filesystem (works even after execute())
+ * setFileData({
+ *   dir: {
+ *     'hello.txt': { source: 'Updated content' },
+ *     'new-file.txt': { source: 'New file!' }
+ *   }
+ * });
  */
 export function setFileData(data) {
-  _setFileData(data);
+  if (!_initialized) {
+    // First call - create our root data object and pass it to preview2-shim
+    // We create our own object so we maintain a reference to it for future mutations
+    _rootData = { dir: {} };
+    syncInPlace(_rootData, data);
+    _setFileData(_rootData);
+    _initialized = true;
+  } else {
+    // Subsequent calls - mutate _rootData in place to preserve WASM references
+    // The Descriptor holds a reference to _rootData, so mutations are visible
+    syncInPlace(_rootData, data);
+  }
 }
 
 /**
@@ -79,6 +151,84 @@ export function getFileData() {
  */
 export function setCwd(path) {
   _setCwd(path);
+}
+
+/**
+ * Update a single file's content in the VFS.
+ * This is more efficient than setFileData for single-file updates.
+ *
+ * @param {string} path - The file path (e.g., '/data/file.txt')
+ * @param {string|Uint8Array} content - The new file content
+ */
+export function updateFile(path, content) {
+  if (!_initialized || !_rootData) {
+    // Initialize with this single file
+    setFileData(fromPaths({ [path]: content }));
+    return;
+  }
+
+  const parts = path.split("/").filter((p) => p.length > 0);
+  let current = _rootData;
+
+  // Navigate to parent directory, creating dirs as needed
+  for (let i = 0; i < parts.length - 1; i++) {
+    const part = parts[i];
+    if (!current.dir) {
+      current.dir = {};
+    }
+    if (!current.dir[part]) {
+      current.dir[part] = { dir: {} };
+    }
+    current = current.dir[part];
+  }
+
+  // Set the file
+  if (!current.dir) {
+    current.dir = {};
+  }
+  const filename = parts[parts.length - 1];
+  if (current.dir[filename]) {
+    // Update existing file in place
+    current.dir[filename].source = content;
+  } else {
+    // Create new file
+    current.dir[filename] = { source: content };
+  }
+}
+
+/**
+ * Delete a file or directory from the VFS.
+ *
+ * @param {string} path - The path to delete (e.g., '/data/file.txt')
+ * @returns {boolean} True if the path was deleted, false if it didn't exist
+ */
+export function deletePath(path) {
+  if (!_initialized || !_rootData) {
+    return false;
+  }
+
+  const parts = path.split("/").filter((p) => p.length > 0);
+  if (parts.length === 0) {
+    return false; // Can't delete root
+  }
+
+  let current = _rootData;
+
+  // Navigate to parent directory
+  for (let i = 0; i < parts.length - 1; i++) {
+    const part = parts[i];
+    if (!current.dir || !current.dir[part]) {
+      return false; // Path doesn't exist
+    }
+    current = current.dir[part];
+  }
+
+  const name = parts[parts.length - 1];
+  if (current.dir && name in current.dir) {
+    delete current.dir[name];
+    return true;
+  }
+  return false;
 }
 
 /**

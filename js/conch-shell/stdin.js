@@ -10,7 +10,7 @@
  * module provides a proper default and allows setting custom stdin data.
  */
 
-import { _setStdin } from "@bytecodealliance/preview2-shim/cli";
+import { _setStdin } from "./shims/cli.js";
 
 /**
  * @typedef {Object} StdinHandler

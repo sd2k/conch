@@ -45,74 +45,74 @@ Note: The module uses top-level await for initialization. The `execute` function
 
 The shell includes these built-in commands:
 
-- **I/O**: `echo`, `printf`, `cat`, `read`
-- **File operations**: `head`, `tail`, `wc`, `tee`
-- **Text processing**: `grep`, `sed`, `awk`, `sort`, `uniq`, `cut`, `tr`
+- **I/O**: `echo`, `cat`, `read`
+- **File operations**: `head`, `tail`, `wc`
+- **Text processing**: `grep`
 - **JSON**: `jq` (via jaq)
 - **Utilities**: `test`, `true`, `false`, `pwd`, `cd`, `export`, `set`
 - **Flow control**: `if`, `for`, `while`, `case`, functions
 
 ## Virtual Filesystem
 
-By default, the shell operates in an empty virtual filesystem. You can set up files before execution:
+By default, the shell operates in an empty virtual filesystem. You can set up and update files at any time:
 
 ```javascript
 import { execute } from '@bsull/conch';
-import { setFileData, fromPaths } from '@bsull/conch/vfs';
+import { setFileData, updateFile, deletePath, fromPaths } from '@bsull/conch/vfs';
 
-// Set up the VFS BEFORE any execute() calls
+// Set up the VFS
 setFileData(fromPaths({
   '/data/input.txt': 'hello world',
   '/config/settings.json': '{"debug": true}'
 }));
 
-// Now the shell can access these files
+// Execute commands
 execute('cat /data/input.txt');  // prints: hello world
+
+// Update the VFS (works even after execute() has been called)
+updateFile('/data/input.txt', 'updated content');
+execute('cat /data/input.txt');  // prints: updated content
+
+// Add new files
+updateFile('/data/new-file.txt', 'new content');
+
+// Delete files
+deletePath('/data/input.txt');
 ```
 
-**Important**: The shell caches its filesystem on first execution. Call `setFileData()` before any `execute()` calls.
+The VFS supports updates even after `execute()` has been called. This is achieved by mutating the underlying filesystem data in place, preserving the WASM shell's references.
 
-### Node.js Setup
+## Browser & Node.js Support
 
-In Node.js, the VFS requires aliasing imports to use browser shims. With Vite/Vitest:
+This package works out of the box in both browsers and Node.js with the same behavior:
 
-```javascript
-// vitest.config.ts
-import { defineConfig } from "vitest/config";
-import { resolve } from "path";
+- Uses the in-memory virtual filesystem (VFS)
+- `setFileData()`, `updateFile()`, and `deletePath()` work as expected
+- No access to the real filesystem (sandboxed by design)
+- No configuration or import aliasing required
 
-const browserShimPath = resolve(
-  __dirname,
-  "node_modules/@bytecodealliance/preview2-shim/lib/browser"
-);
-
-export default defineConfig({
-  resolve: {
-    alias: {
-      "@bytecodealliance/preview2-shim/cli": `${browserShimPath}/cli.js`,
-      "@bytecodealliance/preview2-shim/clocks": `${browserShimPath}/clocks.js`,
-      "@bytecodealliance/preview2-shim/filesystem": `${browserShimPath}/filesystem.js`,
-      "@bytecodealliance/preview2-shim/io": `${browserShimPath}/io.js`,
-      "@bytecodealliance/preview2-shim/random": `${browserShimPath}/random.js`,
-      "@bytecodealliance/preview2-shim/sockets": `${browserShimPath}/sockets.js`,
-      "@bytecodealliance/preview2-shim/http": `${browserShimPath}/http.js`,
-      "@bytecodealliance/preview2-shim": `${browserShimPath}/index.js`,
-    },
-  },
-});
-```
-
-Requires Node.js 19+ (for `globalThis.crypto`).
+**Requirements:** Node.js 19+ (for `globalThis.crypto`)
 
 ## Limitations
 
-- **No network access**: Network operations are not available.
+- **No real filesystem access**: The shell operates in a sandboxed virtual filesystem.
+- **No network access**: Network operations are not available in the sandbox.
 - **Single-threaded**: The shell runs in a single-threaded environment.
 - **Memory limits**: Subject to WebAssembly memory constraints.
+- **Some commands unavailable**: Commands like `ls`, `sed`, `awk`, `sort`, `printf` are not yet implemented.
 
-## Browser Support
+## Platform Support
 
-This package uses the WebAssembly Component Model and requires a modern browser with WebAssembly support. The `@bytecodealliance/preview2-shim` package provides WASI Preview 2 compatibility.
+This package uses the WebAssembly Component Model and requires:
+
+**Node.js:**
+- Node.js 19+ (for `globalThis.crypto`)
+
+**Browsers:**
+- Chrome 119+
+- Firefox 120+
+- Safari 17+
+- Edge 119+
 
 ## License
 

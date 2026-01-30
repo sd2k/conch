@@ -84,17 +84,60 @@ execute('echo hello | cat');
 execute('x=world; echo "Hello $x"');
 ```
 
+## Virtual Filesystem
+
+The shell operates in a virtual in-memory filesystem. You can set up and update files at any time, even after `execute()` has been called:
+
+```javascript
+import { execute } from '@bsull/conch';
+import { setFileData, updateFile, deletePath, fromPaths } from '@bsull/conch/vfs';
+
+// Set up the VFS
+setFileData(fromPaths({
+  '/data/input.txt': 'hello world',
+  '/config/settings.json': '{"debug": true}'
+}));
+
+// Execute commands
+execute('cat /data/input.txt');  // prints: hello world
+
+// Update the VFS (works even after execute() has been called)
+updateFile('/data/input.txt', 'updated content');
+execute('cat /data/input.txt');  // prints: updated content
+
+// Add new files
+updateFile('/data/new-file.txt', 'new content');
+
+// Delete files
+deletePath('/data/input.txt');
+```
+
+The VFS supports dynamic updates by mutating the underlying filesystem data in place, preserving the WASM shell's references.
+
+## Browser & Node.js Support
+
+This package works out of the box in both browsers and Node.js with the same behavior:
+
+- Uses the in-memory virtual filesystem (VFS)
+- `setFileData()`, `updateFile()`, and `deletePath()` work as expected
+- No access to the real filesystem (sandboxed by design)
+- No configuration or import aliasing required
+
+**Requirements:** Node.js 19+ (for `globalThis.crypto`)
+
 ## Limitations
 
-When running in browser/Node.js via jco:
+1. **No real filesystem access**: The shell operates in a sandboxed virtual filesystem.
 
-1. **No real filesystem**: The shell operates in a virtual filesystem provided by the WASI shim. It cannot access the host filesystem.
-
-2. **No network access**: Network operations are not available.
+2. **No network access**: Network operations are not available in the sandbox.
 
 3. **stdout/stderr**: Output goes to the WASI shim's stdout/stderr, which by default prints to `console.log`/`console.error`.
 
-4. **Some builtins may not work**: Operations requiring unsupported WASI features (like `printf` which needs locale support) may fail with "operation not supported on this platform".
+4. **Some commands unavailable**: Commands like `ls`, `sed`, `awk`, `sort`, `printf` are not yet implemented and will fail with "operation not supported on this platform".
+
+5. **Single-threaded**: The shell runs in a single-threaded environment.
+
+6. **Memory limits**: Subject to WebAssembly memory constraints.
 
 ## Publishing
 

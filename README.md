@@ -182,6 +182,31 @@ mise run test-all
 ./target/debug/conch-cli script.sh
 ```
 
+## JavaScript Bindings
+
+Conch also provides JavaScript/TypeScript bindings for browsers and Node.js via the `@bsull/conch` npm package:
+
+```javascript
+import { execute } from '@bsull/conch';
+import { setFileData, updateFile, fromPaths } from '@bsull/conch/vfs';
+
+// Set up the virtual filesystem
+setFileData(fromPaths({
+  '/data/input.txt': 'hello world',
+}));
+
+// Execute shell commands
+execute('cat /data/input.txt');  // prints: hello world
+
+// Update files dynamically (works even after execute())
+updateFile('/data/input.txt', 'updated content');
+execute('cat /data/input.txt');  // prints: updated content
+```
+
+Works out of the box in both browsers and Node.js 19+ with the same sandboxed VFS behavior—no configuration required.
+
+See [`js/conch-shell/README.md`](js/conch-shell/README.md) for full documentation.
+
 ## Go Integration
 
 The library exposes a C FFI callable from Go using purego:

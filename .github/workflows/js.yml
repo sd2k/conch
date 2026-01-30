@@ -46,6 +46,10 @@ jobs:
             --out-dir conch-shell \
             ../crates/conch-shell/wit/shell.wit
 
+      - name: Install conch-shell dependencies
+        working-directory: js/conch-shell
+        run: npm ci
+
       - name: Install test dependencies
         working-directory: js/testpkg
         run: npm ci

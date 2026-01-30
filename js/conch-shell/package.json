@@ -10,6 +10,7 @@
   },
   "files": [
     "interfaces/*",
+    "shims/*",
     "*.wasm",
     "*.js",
     "*.d.ts",
