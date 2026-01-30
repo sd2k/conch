@@ -719,6 +719,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "eryx-vfs",
+ "futures",
  "glob",
  "libc",
  "serde",

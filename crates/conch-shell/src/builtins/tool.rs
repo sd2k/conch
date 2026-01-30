@@ -39,7 +39,9 @@ use brush_core::{ExecutionContext, ExecutionResult, ShellExtensions, builtins, e
 
 // Import the WIT-generated invoke_tool function and types
 #[cfg(target_family = "wasm")]
-use crate::{ToolRequest as WitToolRequest, invoke_tool};
+use crate::{ToolRequest, invoke_tool};
+#[cfg(target_family = "wasm")]
+use ToolRequest as WitToolRequest;
 
 /// The tool builtin command.
 pub struct ToolCommand;

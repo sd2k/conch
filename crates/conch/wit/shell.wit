@@ -1,14 +1,9 @@
-package conch:shell@0.1.0;
+package conch:shell@0.2.0;
 
-/// The conch shell sandbox world.
+/// Tool invocation types and import interface.
 ///
-/// This defines the interface between the host (Rust) and the guest (shell WASM).
-/// The guest exports an execute function that runs shell scripts.
-/// Standard WASI interfaces are used for filesystem, stdio, and clocks.
-///
-/// Note: stdout/stderr are captured by the host via WASI pipes, not returned
-/// in the execute result. The shell writes directly to WASI stdout/stderr.
-world shell {
+/// The host provides tool execution capability via this interface.
+interface tools {
     /// Tool invocation request from the shell.
     ///
     /// When a script runs `tool <name> --param value`, the shell calls the
@@ -30,18 +25,62 @@ world shell {
         output: string,
     }
 
-    /// Import: Host provides tool execution capability.
+    /// Invoke a tool from the shell.
     ///
     /// When the shell's `tool` builtin is invoked, it calls this function
     /// to request tool execution from the host/orchestrator.
-    import invoke-tool: func(request: tool-request) -> tool-result;
+    invoke-tool: func(request: tool-request) -> tool-result;
+}
 
-    /// Execute a shell script in the sandbox.
-    ///
-    /// The script is interpreted as bash-compatible shell code.
-    /// Standard builtins like echo, cat, grep, jq, head, tail are available.
-    ///
-    /// Returns the exit code on success, or an error message if the shell
-    /// itself failed to initialize or execute (not script errors).
-    export execute: func(script: string) -> result<s32, string>;
+/// A persistent shell instance that maintains state across executions.
+///
+/// Variables, functions, and aliases defined in one `execute` call
+/// persist for subsequent calls on the same instance.
+interface shell {
+    /// A shell interpreter instance with persistent state.
+    resource instance {
+        /// Create a new shell instance with default configuration.
+        constructor();
+
+        /// Execute a shell script.
+        ///
+        /// The script is interpreted as bash-compatible shell code.
+        /// Standard builtins like echo, cat, grep, jq, head, tail are available.
+        ///
+        /// Variables, functions, and aliases defined here persist for
+        /// subsequent execute calls on this instance.
+        ///
+        /// Returns the exit code on success, or an error message if the shell
+        /// itself failed (not script errors - those return non-zero exit codes).
+        execute: func(script: string) -> result<s32, string>;
+
+        /// Get a shell variable's value.
+        ///
+        /// Returns the value of the variable, or none if not set.
+        get-var: func(name: string) -> option<string>;
+
+        /// Set a shell variable.
+        ///
+        /// This is equivalent to running `name=value` in the shell.
+        set-var: func(name: string, value: string);
+
+        /// Get the exit code from the last executed command ($?).
+        last-exit-code: func() -> s32;
+    }
+}
+
+/// The conch shell sandbox world.
+///
+/// This defines the interface between the host (Rust) and the guest (shell WASM).
+/// The guest exports a shell resource that maintains state across executions.
+/// Standard WASI interfaces are used for filesystem, stdio, and clocks.
+///
+/// Note: stdout/stderr are captured by the host via WASI pipes, not returned
+/// in the execute result. The shell writes directly to WASI stdout/stderr.
+world shell-sandbox {
+    /// Import: Host provides tool execution capability.
+    import tools;
+
+    /// Export: The shell interface with persistent instance resource.
+    export shell;
 }

@@ -25,6 +25,7 @@ wasmtime-wasi.workspace = true
 wasmtime-wasi-io.workspace = true
 eryx-vfs.workspace = true
 tokio = { workspace = true, features = ["full"] }
+futures.workspace = true
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true

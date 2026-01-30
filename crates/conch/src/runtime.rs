@@ -3,6 +3,7 @@
 use std::fmt;
 use std::sync::Arc;
 
+use eryx_vfs::{DirPerms, FilePerms, HybridVfsCtx, InMemoryStorage};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::Semaphore;
@@ -64,8 +65,9 @@ pub struct ExecutionResult {
 /// Wraps the ComponentShellExecutor to run shell scripts in a WASM sandbox.
 /// Provides concurrency limiting for executing multiple scripts.
 ///
-/// For more advanced VFS usage with hybrid filesystem mounts, use the
-/// [`Shell`](crate::Shell) API instead.
+/// Each execution creates a fresh shell instance, so state does not persist
+/// between calls. For stateful execution with persistent variables and VFS,
+/// use the [`Shell`](crate::Shell) API instead.
 pub struct Conch {
     max_concurrent: usize,
     semaphore: Arc<Semaphore>,
@@ -119,8 +121,11 @@ impl Conch {
 
     /// Execute a shell script.
     ///
-    /// This is a simple API for running shell scripts without VFS.
-    /// For VFS support with hybrid filesystem mounts, use [`Shell`](crate::Shell).
+    /// This creates a temporary shell instance for each execution, so state
+    /// (variables, functions, aliases) does not persist between calls.
+    ///
+    /// For stateful execution, use [`Shell`](crate::Shell) instead.
+    #[cfg(feature = "embedded-shell")]
     pub async fn execute(
         &self,
         script: &str,
@@ -132,7 +137,31 @@ impl Conch {
             .await
             .map_err(|_| RuntimeError::Semaphore)?;
 
-        self.executor.execute(script, &limits).await
+        // Create a minimal VFS context with a /tmp directory
+        let storage = Arc::new(InMemoryStorage::new());
+        let mut hybrid_ctx = HybridVfsCtx::new(storage);
+        hybrid_ctx.add_vfs_preopen("/tmp", DirPerms::all(), FilePerms::all());
+
+        // Create a temporary shell instance
+        let mut instance = self
+            .executor
+            .create_instance(&limits, hybrid_ctx, None)
+            .await?;
+
+        // Execute the script
+        instance.execute(script, &limits).await
+    }
+
+    /// Execute a shell script (stub for when embedded-shell is disabled).
+    #[cfg(not(feature = "embedded-shell"))]
+    pub async fn execute(
+        &self,
+        _script: &str,
+        _limits: ResourceLimits,
+    ) -> Result<ExecutionResult, RuntimeError> {
+        Err(RuntimeError::Wasm(
+            "execute requires embedded-shell feature".to_string(),
+        ))
     }
 
     /// Get the maximum concurrent executions
@@ -142,40 +171,13 @@ impl Conch {
 }
 
 #[cfg(test)]
+#[cfg(feature = "embedded-shell")]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
     fn get_test_shell() -> Option<Conch> {
-        // Try embedded first
-        #[cfg(feature = "embedded-shell")]
-        {
-            Conch::embedded(1).ok()
-        }
-
-        // Fall back to file-based
-        #[cfg(not(feature = "embedded-shell"))]
-        {
-            let workspace_root = std::env::var("CARGO_MANIFEST_DIR")
-                .map(|p| {
-                    std::path::PathBuf::from(p)
-                        .parent()
-                        .unwrap()
-                        .parent()
-                        .unwrap()
-                        .to_path_buf()
-                })
-                .unwrap_or_else(|_| std::path::PathBuf::from("."));
-
-            let module_path = workspace_root.join("target/wasm32-wasip2/release/conch_shell.wasm");
-
-            if module_path.exists() {
-                Conch::from_file(&module_path, 1).ok()
-            } else {
-                eprintln!("Component not found at {:?}", module_path);
-                None
-            }
-        }
+        Conch::embedded(1).ok()
     }
 
     #[tokio::test]
@@ -235,5 +237,33 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.exit_code, 1);
+    }
+
+    #[tokio::test]
+    async fn test_stateless_execution() {
+        // Verify that state does NOT persist between calls (this is the Conch behavior)
+        let Some(shell) = get_test_shell() else {
+            return;
+        };
+
+        // Set a variable
+        let result = shell
+            .execute("x=42", ResourceLimits::default())
+            .await
+            .unwrap();
+        assert_eq!(result.exit_code, 0);
+
+        // Variable should NOT be visible in next call (fresh instance)
+        let result = shell
+            .execute("echo ${x:-unset}", ResourceLimits::default())
+            .await
+            .unwrap();
+        assert_eq!(result.exit_code, 0);
+        let stdout = String::from_utf8_lossy(&result.stdout);
+        assert!(
+            stdout.contains("unset"),
+            "Variable should not persist: {:?}",
+            stdout
+        );
     }
 }

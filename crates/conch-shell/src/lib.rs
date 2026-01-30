@@ -1,71 +1,147 @@
 //! Conch Shell - Brush-based WASM Component
 //!
 //! This crate wraps brush-core to provide a full bash-compatible shell
-//! that runs inside a WASM sandbox. It exports a simple execute interface
-//! via the WebAssembly Component Model (WIT).
+//! that runs inside a WASM sandbox. It exports a shell resource that
+//! maintains state across executions via the WebAssembly Component Model (WIT).
 
 #![allow(clippy::expect_used)] // WASM is single-threaded, mutex poisoning is fatal
 #![allow(missing_docs)] // WIT-generated code doesn't have docs
 
+use std::cell::RefCell;
+
+use brush_core::env::{EnvironmentLookup, EnvironmentScope};
+use brush_core::variables::ShellValueLiteral;
 use brush_core::{ExecutionParameters, Shell, SourceInfo};
 
 mod builtins;
 
-// Generate WIT bindings for the shell world.
-// This creates the `Guest` trait we need to implement.
+// Generate WIT bindings for the shell-sandbox world.
 wit_bindgen::generate!({
     path: "wit/shell.wit",
-    world: "shell",
+    world: "shell-sandbox",
 });
 
-/// Our implementation of the shell component.
-struct ShellComponent;
+// Re-export types for use in builtins - tools interface has the invoke_tool import
+pub use conch::shell::tools::{ToolRequest, ToolResult, invoke_tool};
 
-impl Guest for ShellComponent {
-    /// Execute a shell script and return the exit code.
-    ///
-    /// Returns Ok(exit_code) on success, or Err(message) if the shell
-    /// itself failed to initialize. Note that script errors (like
-    /// "command not found") still return Ok with a non-zero exit code.
-    ///
-    /// stdout/stderr are written to WASI pipes, not returned here.
-    fn execute(script: String) -> Result<i32, String> {
-        // Build tokio runtime (single-threaded for WASM)
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| format!("failed to create runtime: {}", e))?;
+/// A persistent shell instance that maintains state across executions.
+///
+/// This struct holds the brush shell and tokio runtime, allowing variables,
+/// functions, and aliases to persist between `execute` calls.
+pub struct ShellInstance {
+    /// The brush shell instance. RefCell for interior mutability since
+    /// wit-bindgen gives us &self, not &mut self.
+    shell: RefCell<Shell>,
+    /// Tokio runtime for async operations.
+    runtime: tokio::runtime::Runtime,
+    /// Last exit code from executed command.
+    last_exit_code: RefCell<i32>,
+}
 
-        // Execute the script
-        rt.block_on(execute_script_async(&script))
+impl std::fmt::Debug for ShellInstance {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ShellInstance")
+            .field("last_exit_code", &self.last_exit_code)
+            .finish_non_exhaustive()
     }
 }
 
-/// Async implementation of script execution.
-async fn execute_script_async(script: &str) -> Result<i32, String> {
-    // Get default builtins and add our custom ones
-    let mut shell_builtins = brush_builtins::default_builtins(brush_builtins::BuiltinSet::BashMode);
-    builtins::register_builtins(&mut shell_builtins);
+impl exports::conch::shell::shell::GuestInstance for ShellInstance {
+    /// Create a new shell instance with default configuration.
+    fn new() -> Self {
+        // Build tokio runtime (single-threaded for WASM)
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("failed to create tokio runtime");
 
-    let mut shell = Shell::builder()
-        .builtins(shell_builtins)
-        .build()
-        .await
-        .map_err(|e| format!("failed to create shell: {}", e))?;
+        // Get default builtins and add our custom ones
+        let mut shell_builtins =
+            brush_builtins::default_builtins(brush_builtins::BuiltinSet::BashMode);
+        builtins::register_builtins(&mut shell_builtins);
 
-    let source_info = SourceInfo::default();
-    let exec_params = ExecutionParameters::default();
+        // Create the shell (blocking on async)
+        let shell = runtime.block_on(async {
+            Shell::builder()
+                .builtins(shell_builtins)
+                .build()
+                .await
+                .expect("failed to create shell")
+        });
 
-    let result = shell
-        .run_string(script, &source_info, &exec_params)
-        .await
-        .map_err(|e| format!("execution error: {}", e))?;
+        Self {
+            shell: RefCell::new(shell),
+            runtime,
+            last_exit_code: RefCell::new(0),
+        }
+    }
 
-    Ok(i32::from(u8::from(result.exit_code)))
+    /// Execute a shell script.
+    ///
+    /// Returns Ok(exit_code) on success, or Err(message) if the shell
+    /// itself failed. Script errors (like "command not found") return
+    /// Ok with a non-zero exit code.
+    ///
+    /// State (variables, functions, aliases) persists between calls.
+    fn execute(&self, script: String) -> Result<i32, String> {
+        let mut shell = self.shell.borrow_mut();
+
+        let result = self.runtime.block_on(async {
+            let source_info = SourceInfo::default();
+            let exec_params = ExecutionParameters::default();
+
+            shell
+                .run_string(&script, &source_info, &exec_params)
+                .await
+                .map_err(|e| format!("execution error: {}", e))
+        })?;
+
+        let exit_code = i32::from(u8::from(result.exit_code));
+        *self.last_exit_code.borrow_mut() = exit_code;
+
+        Ok(exit_code)
+    }
+
+    /// Get a shell variable's value.
+    fn get_var(&self, name: String) -> Option<String> {
+        let shell = self.shell.borrow();
+        shell
+            .env()
+            .get(&name)
+            .map(|(_, var)| var.value().to_cow_str(&*shell).into_owned())
+    }
+
+    /// Set a shell variable.
+    fn set_var(&self, name: String, value: String) {
+        let mut shell = self.shell.borrow_mut();
+        // Use update_or_add to set the variable in the global scope
+        shell
+            .env_mut()
+            .update_or_add(
+                &name,
+                ShellValueLiteral::Scalar(value),
+                |_| Ok(()),
+                EnvironmentLookup::Anywhere,
+                EnvironmentScope::Global,
+            )
+            .expect("failed to set variable");
+    }
+
+    /// Get the exit code from the last executed command.
+    fn last_exit_code(&self) -> i32 {
+        *self.last_exit_code.borrow()
+    }
 }
 
-// Export the component.
-export!(ShellComponent);
+/// Component struct that implements the Guest trait.
+struct Component;
+
+impl exports::conch::shell::shell::Guest for Component {
+    type Instance = ShellInstance;
+}
+
+// Export the component using the generated export macro.
+export!(Component);
 
 // ============================================================================
 // Tests (run natively, not in WASM)
@@ -105,12 +181,51 @@ mod tests {
         Ok(i32::from(u8::from(result.exit_code)))
     }
 
+    /// Execute multiple scripts on the same shell instance (for persistence tests).
+    pub(crate) async fn execute_sequence_quiet(scripts: &[&str]) -> Result<Vec<i32>, String> {
+        let mut shell_builtins =
+            brush_builtins::default_builtins(brush_builtins::BuiltinSet::BashMode);
+        crate::builtins::register_builtins(&mut shell_builtins);
+
+        let null_out = openfiles::null().map_err(|e| e.to_string())?;
+        let null_err = openfiles::null().map_err(|e| e.to_string())?;
+
+        let mut shell = Shell::builder()
+            .builtins(shell_builtins)
+            .fds(HashMap::from([(1.into(), null_out), (2.into(), null_err)]))
+            .build()
+            .await
+            .map_err(|e| format!("failed to create shell: {}", e))?;
+
+        let source_info = SourceInfo::default();
+        let exec_params = ExecutionParameters::default();
+
+        let mut results = Vec::new();
+        for script in scripts {
+            let result = shell
+                .run_string(*script, &source_info, &exec_params)
+                .await
+                .map_err(|e| format!("execution error: {}", e))?;
+            results.push(i32::from(u8::from(result.exit_code)));
+        }
+
+        Ok(results)
+    }
+
     fn execute_test(script: &str) -> Result<i32, String> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("failed to create runtime");
         rt.block_on(execute_quiet(script))
+    }
+
+    fn execute_sequence_test(scripts: &[&str]) -> Result<Vec<i32>, String> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("failed to create runtime");
+        rt.block_on(execute_sequence_quiet(scripts))
     }
 
     #[test]
@@ -153,6 +268,28 @@ mod tests {
     fn test_loop() {
         let result = execute_test("for i in 1 2 3; do echo $i; done");
         assert_eq!(result, Ok(0));
+    }
+
+    #[test]
+    fn test_variable_persistence() {
+        // Test that variables persist across multiple execute calls
+        let results = execute_sequence_test(&[
+            "x=42",
+            "echo $x", // Should see x=42
+            "y=$((x + 8))",
+            "echo $y", // Should see y=50
+        ]);
+        assert_eq!(results, Ok(vec![0, 0, 0, 0]));
+    }
+
+    #[test]
+    fn test_function_persistence() {
+        // Test that functions persist across multiple execute calls
+        let results = execute_sequence_test(&[
+            "greet() { echo \"Hello, $1!\"; }",
+            "greet World", // Should work
+        ]);
+        assert_eq!(results, Ok(vec![0, 0]));
     }
 }
 
