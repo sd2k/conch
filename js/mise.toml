@@ -47,7 +47,10 @@ description = "Run JavaScript tests"
 depends = ["build"]
 sources = ["conch-shell/**/*.js", "conch-shell/**/*.wasm", "testpkg/**/*.ts"]
 dir = "testpkg"
-run = "npm ci && npm run typecheck && npm run test:ci"
+run = """
+cd ../conch-shell && npm ci
+cd ../testpkg && npm ci && npm run typecheck && npm run test:ci
+"""
 
 [tasks.clean]
 description = "Clean JavaScript build artifacts"
