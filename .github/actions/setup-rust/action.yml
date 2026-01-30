@@ -1,9 +1,15 @@
 name: "Setup Rust Environment"
-description: "Install cargo-binstall, cargo-nextest, mise, and Rust toolchain"
+description: "Install cargo-binstall, cargo-nextest, mise, protoc, and Rust toolchain"
 
 runs:
   using: "composite"
   steps:
+    - name: Install protoc
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y protobuf-compiler
+
     - name: Install cargo-binstall
       shell: bash
       run: curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
@@ -16,3 +22,7 @@ runs:
       uses: jdx/mise-action@v3
       with:
         cache: false # We handle caching ourselves to include ~/.rustup
+
+    - name: Install rustfmt and clippy
+      shell: bash
+      run: rustup component add rustfmt clippy
