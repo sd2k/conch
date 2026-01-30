@@ -1,0 +1,29 @@
+name: "Mark WASM as Current"
+description: "Touch WASM artifacts to mark them as up-to-date for mise"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Mark WASM as up-to-date
+      shell: bash
+      run: |
+        # Touch WASM artifact to be newer than sources so mise skips rebuild
+        touch target/wasm32-wasip2/release/conch_shell.wasm
+
+        # Check if WASM changed by comparing checksums
+        # This invalidates cached binaries that have old WASM embedded
+        WASM_HASH=$(sha256sum target/wasm32-wasip2/release/conch_shell.wasm | cut -d' ' -f1)
+        CACHED_HASH=""
+        if [ -f target/.wasm-hash ]; then
+          CACHED_HASH=$(cat target/.wasm-hash)
+        fi
+
+        if [ "$WASM_HASH" != "$CACHED_HASH" ]; then
+          echo "WASM changed ($CACHED_HASH -> $WASM_HASH), invalidating component.rs"
+          # The WASM bytes are included via include_bytes! in component.rs
+          touch crates/conch/src/executor/component.rs
+          mkdir -p target
+          echo "$WASM_HASH" > target/.wasm-hash
+        else
+          echo "WASM unchanged ($WASM_HASH)"
+        fi
