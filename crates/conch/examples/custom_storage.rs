@@ -36,7 +36,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Create first shell using the shared storage
-    let shell1 = Shell::builder().vfs_arc(Arc::clone(&storage)).build()?;
+    let mut shell1 = Shell::builder()
+        .vfs_arc(Arc::clone(&storage))
+        .build()
+        .await?;
 
     println!("\n=== Shell 1: Read and process data ===");
     let result = shell1
@@ -60,7 +63,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(result.exit_code, 0, "Shell 1 write failed");
 
     // Create second shell using the same storage - it sees shell1's output
-    let shell2 = Shell::builder().vfs_arc(Arc::clone(&storage)).build()?;
+    let mut shell2 = Shell::builder()
+        .vfs_arc(Arc::clone(&storage))
+        .build()
+        .await?;
 
     println!("\n=== Shell 2: Sees Shell 1's output ===");
     let result = shell2

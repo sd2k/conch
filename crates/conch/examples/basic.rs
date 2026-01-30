@@ -10,7 +10,7 @@ use conch::{ResourceLimits, Shell};
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create a shell with default settings.
     // This provides a /scratch directory backed by in-memory VFS storage.
-    let shell = Shell::builder().build()?;
+    let mut shell = Shell::builder().build().await?;
 
     // Write some data to the VFS from the host
     shell

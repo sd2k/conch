@@ -1,32 +1,34 @@
 //! Low-level executor example.
 //!
-//! Demonstrates direct use of ComponentShellExecutor for maximum control
-//! over the WASM runtime. This is useful when you need:
+//! Demonstrates use of the Conch API for stateless execution with maximum control
+//! over resource limits. This is useful when you need:
 //!
 //! - Custom resource limits per execution
-//! - Direct access to the wasmtime Engine
-//! - Integration with existing WASM infrastructure
+//! - Stateless execution (no state persists between calls)
+//! - Concurrency limiting for multiple scripts
+//!
+//! For stateful execution where variables persist, use the Shell API instead.
 //!
 //! Run with: cargo run -p conch --example low_level --features embedded-shell
 
-use conch::{ComponentShellExecutor, ResourceLimits};
+use conch::{Conch, ResourceLimits};
 use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Create the executor directly from embedded WASM bytes.
-    // This gives you access to the underlying wasmtime Engine.
-    let executor = ComponentShellExecutor::embedded()?;
+    // Create the Conch executor with embedded WASM bytes.
+    // The second parameter is max_concurrent - how many scripts can run in parallel.
+    let conch = Conch::embedded(4)?;
 
-    println!("Engine created successfully");
-    println!("Engine reference: {:?}\n", executor.engine());
+    println!("Conch executor created successfully");
+    println!("Executor: {:?}\n", conch);
 
     // Execute with default limits
     println!("=== Basic execution ===");
-    let result = executor
+    let result = conch
         .execute(
             "echo 'Hello from low-level API!'",
-            &ResourceLimits::default(),
+            ResourceLimits::default(),
         )
         .await?;
     println!("stdout: {}", String::from_utf8_lossy(&result.stdout));
@@ -41,55 +43,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         timeout: Duration::from_secs(5),    // 5 second wall clock
     };
 
-    let result = executor
+    let result = conch
         .execute(
             "for i in 1 2 3; do echo \"iteration $i\"; done",
-            &strict_limits,
+            strict_limits,
         )
         .await?;
     println!("stdout: {}", String::from_utf8_lossy(&result.stdout));
 
-    // Execute multiple scripts - each gets isolated state
+    // Execute multiple scripts - each gets isolated state (stateless execution)
     println!("\n=== Isolation between executions ===");
 
     // First execution sets a variable
-    let result1 = executor
+    let result1 = conch
         .execute(
             "export MY_VAR=hello; echo $MY_VAR",
-            &ResourceLimits::default(),
+            ResourceLimits::default(),
         )
         .await?;
     println!("Execution 1: {}", String::from_utf8_lossy(&result1.stdout));
 
-    // Second execution - variable should not exist
-    let result2 = executor
-        .execute("echo \"MY_VAR is: '$MY_VAR'\"", &ResourceLimits::default())
+    // Second execution - variable should not exist (fresh instance each time)
+    let result2 = conch
+        .execute("echo \"MY_VAR is: '$MY_VAR'\"", ResourceLimits::default())
         .await?;
     println!("Execution 2: {}", String::from_utf8_lossy(&result2.stdout));
 
-    // Clone the executor - both share the same Engine and InstancePre
-    println!("\n=== Cloned executor ===");
-    let executor2 = executor.clone();
-
-    let result = executor2
-        .execute("echo 'From cloned executor'", &ResourceLimits::default())
-        .await?;
-    println!("stdout: {}", String::from_utf8_lossy(&result.stdout));
-
     // Demonstrate error handling
     println!("\n=== Error handling ===");
-    let result = executor
-        .execute("nonexistent_command", &ResourceLimits::default())
+    let result = conch
+        .execute("nonexistent_command", ResourceLimits::default())
         .await?;
     println!("exit code: {}", result.exit_code);
     println!("stderr: {}", String::from_utf8_lossy(&result.stderr));
 
     // Pipeline execution
     println!("\n=== Complex pipeline ===");
-    let result = executor
+    let result = conch
         .execute(
             "echo -e 'apple\\nbanana\\napple\\ncherry\\napple' | sort | uniq -c | sort -rn",
-            &ResourceLimits::default(),
+            ResourceLimits::default(),
         )
         .await?;
     println!("stdout: {}", String::from_utf8_lossy(&result.stdout));

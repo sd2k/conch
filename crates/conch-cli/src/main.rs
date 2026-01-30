@@ -7,7 +7,7 @@
 
 use std::io::{self, Read, Write};
 
-use conch::{ComponentShellExecutor, ResourceLimits};
+use conch::{Conch, ResourceLimits};
 
 #[tokio::main]
 async fn main() {
@@ -35,9 +35,9 @@ async fn main() {
         script
     };
 
-    // Create the shell executor
-    let executor = match ComponentShellExecutor::embedded() {
-        Ok(e) => e,
+    // Create the shell executor (using Conch for simple stateless execution)
+    let conch = match Conch::embedded(1) {
+        Ok(c) => c,
         Err(e) => {
             eprintln!("conch: failed to initialize shell: {}", e);
             std::process::exit(1);
@@ -46,7 +46,7 @@ async fn main() {
 
     // Execute the script
     let limits = ResourceLimits::default();
-    let result = match executor.execute(&script, &limits).await {
+    let result = match conch.execute(&script, limits).await {
         Ok(r) => r,
         Err(e) => {
             eprintln!("conch: execution error: {}", e);

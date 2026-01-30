@@ -300,7 +300,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Create sandbox with tool definitions
-    let sandbox = AgentSandbox::builder("file-agent")
+    let mut sandbox = AgentSandbox::builder("file-agent")
         .name("File Operations Agent")
         .tool(ToolDefinition::new(
             "file_read",

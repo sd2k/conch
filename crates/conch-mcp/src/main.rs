@@ -134,7 +134,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Create the Conch server
-    let server = ConchServer::new(args.max_concurrent, mounts)?;
+    let server = ConchServer::new(args.max_concurrent, mounts);
 
     // Serve over stdio
     let service = server

@@ -130,7 +130,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Create a sandbox with several tools
-    let sandbox = AgentSandbox::builder("worker-001")
+    let mut sandbox = AgentSandbox::builder("worker-001")
         .tool(ToolDefinition::new(
             "calculator",
             "Perform mathematical calculations",

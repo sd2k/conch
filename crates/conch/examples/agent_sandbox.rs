@@ -78,7 +78,7 @@ A> I'll check the Cargo.toml file for you."#,
     };
 
     // Build an agent sandbox with tools and configuration
-    let sandbox = AgentSandbox::builder("analyst-001")
+    let mut sandbox = AgentSandbox::builder("analyst-001")
         .name("Code Analyst")
         .params(serde_json::json!({
             "task": "Analyze project dependencies",

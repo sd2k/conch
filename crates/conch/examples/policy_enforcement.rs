@@ -26,7 +26,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  - Write access to /agent/scratch/** (temporary files)");
     println!("  - All other paths are denied by default\n");
 
-    let sandbox = AgentSandbox::builder("agent-001")
+    let mut sandbox = AgentSandbox::builder("agent-001")
         .name("Restricted Agent")
         .policy(agent_sandbox_policy())
         .build()
@@ -62,7 +62,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // PolicyBuilder::new() is deny-by-default
     let custom_policy = PolicyBuilder::new().allow_read("/agent/**").build();
 
-    let sandbox = AgentSandbox::builder("agent-002")
+    let mut sandbox = AgentSandbox::builder("agent-002")
         .name("Read-Only Agent")
         .policy(custom_policy)
         .build()
@@ -98,7 +98,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Default is deny (PolicyBuilder::new() is deny-by-default)
         .build();
 
-    let sandbox = AgentSandbox::builder("agent-003")
+    let mut sandbox = AgentSandbox::builder("agent-003")
         .name("Fine-Grained Agent")
         .policy(fine_grained_policy)
         .build()
@@ -143,7 +143,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .deny_write("/agent/metadata.json") // Only deny writing to metadata
         .build();
 
-    let sandbox = AgentSandbox::builder("agent-004")
+    let mut sandbox = AgentSandbox::builder("agent-004")
         .name("Permissive Agent")
         .policy(permissive_policy)
         .build()
@@ -185,7 +185,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .allow_write("/agent/scratch/**")
         .build();
 
-    let sandbox = AgentSandbox::builder("agent-005")
+    let mut sandbox = AgentSandbox::builder("agent-005")
         .name("Selective Agent")
         .policy(selective_policy)
         .build()

@@ -81,7 +81,7 @@ async fn demo_approved_safe_script() -> Result<(), Box<dyn std::error::Error>> {
         .allow_write("/agent/scratch/**")
         .build();
 
-    let sandbox = AgentSandbox::builder("analyst-001")
+    let mut sandbox = AgentSandbox::builder("analyst-001")
         .name("Data Analyst")
         .policy(policy)
         .build()
@@ -145,7 +145,7 @@ async fn demo_approved_malicious_script() -> Result<(), Box<dyn std::error::Erro
         .allow_write("/agent/scratch/**")
         .build();
 
-    let sandbox = AgentSandbox::builder("sneaky-agent")
+    let mut sandbox = AgentSandbox::builder("sneaky-agent")
         .name("Sneaky Agent")
         .policy(policy)
         .build()
@@ -251,7 +251,7 @@ async fn demo_interactive_approval() -> Result<(), Box<dyn std::error::Error>> {
         .allow_write("/agent/scratch/**")
         .build();
 
-    let sandbox = AgentSandbox::builder("interactive-agent")
+    let mut sandbox = AgentSandbox::builder("interactive-agent")
         .name("Interactive Agent")
         .policy(policy)
         .build()

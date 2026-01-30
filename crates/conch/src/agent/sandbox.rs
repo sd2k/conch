@@ -530,7 +530,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sandbox_creation() {
-        let mut sandbox = AgentSandbox::builder("agent-123")
+        let sandbox = AgentSandbox::builder("agent-123")
             .build()
             .await
             .expect("Failed to build sandbox");
@@ -540,7 +540,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sandbox_with_name_and_parent() {
-        let mut sandbox = AgentSandbox::builder("agent-123")
+        let sandbox = AgentSandbox::builder("agent-123")
             .name("test-agent")
             .parent("parent-456")
             .build()
