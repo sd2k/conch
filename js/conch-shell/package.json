@@ -6,7 +6,7 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/bsull/conch.git"
+    "url": "git+https://github.com/sd2k/conch.git"
   },
   "files": [
     "interfaces/*",
