@@ -211,19 +211,21 @@ pub struct ShellBuilder {
     vfs_mounts: Vec<VfsMount>,
     real_mounts: Vec<RealMount>,
     executor: Option<ComponentShellExecutor>,
+    #[cfg(feature = "embedded-shell")]
     tool_handler: Option<Arc<dyn ToolHandler>>,
     limits: Option<ResourceLimits>,
 }
 
 impl std::fmt::Debug for ShellBuilder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ShellBuilder")
-            .field("has_vfs", &self.vfs.is_some())
+        let mut s = f.debug_struct("ShellBuilder");
+        s.field("has_vfs", &self.vfs.is_some())
             .field("vfs_mounts", &self.vfs_mounts)
             .field("real_mounts", &self.real_mounts)
-            .field("has_executor", &self.executor.is_some())
-            .field("has_tool_handler", &self.tool_handler.is_some())
-            .finish()
+            .field("has_executor", &self.executor.is_some());
+        #[cfg(feature = "embedded-shell")]
+        s.field("has_tool_handler", &self.tool_handler.is_some());
+        s.finish()
     }
 }
 
@@ -243,6 +245,7 @@ impl ShellBuilder {
             vfs_mounts: Vec::new(),
             real_mounts: Vec::new(),
             executor: None,
+            #[cfg(feature = "embedded-shell")]
             tool_handler: None,
             limits: None,
         }
@@ -337,6 +340,7 @@ impl ShellBuilder {
     ///     .build()
     ///     .await?;
     /// ```
+    #[cfg(feature = "embedded-shell")]
     pub fn tool_handler(mut self, handler: impl ToolHandler + 'static) -> Self {
         self.tool_handler = Some(Arc::new(handler));
         self
@@ -557,6 +561,7 @@ impl Shell {
 
 #[cfg(test)]
 #[cfg(feature = "embedded-shell")]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
 

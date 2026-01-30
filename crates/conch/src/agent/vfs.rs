@@ -497,6 +497,7 @@ impl VfsStorage for AgentVfs {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
     use eryx_vfs::InMemoryStorage;

@@ -211,6 +211,7 @@ impl<S: VfsStorage + ?Sized + 'static, P: PolicyHandler + ?Sized + 'static> VfsS
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::policy::{Policy, PolicyBuilder};

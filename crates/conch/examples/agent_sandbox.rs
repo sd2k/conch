@@ -1,5 +1,7 @@
 //! Agent Sandbox Example
 //!
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+//!
 //! Demonstrates the AgentSandbox API for creating isolated agent execution
 //! environments with tool access and conversation history.
 //!
