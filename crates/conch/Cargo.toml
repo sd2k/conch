@@ -70,6 +70,14 @@ required-features = ["embedded-shell"]
 name = "external_tools"
 required-features = ["embedded-shell"]
 
+[[example]]
+name = "approval_and_policy"
+required-features = ["embedded-shell"]
+
+[[example]]
+name = "policy_enforcement"
+required-features = ["embedded-shell"]
+
 [[test]]
 name = "agent_integration"
 required-features = ["embedded-shell"]

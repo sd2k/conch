@@ -126,7 +126,7 @@ jobs:
       - name: Check MSRV
         # Exclude conch-shell (WASM target) and packages requiring embedded-shell feature
         # Don't use --all-features as embedded-shell requires the WASM artifact
-        run: cargo check --workspace --exclude conch-shell --exclude conch-cli --exclude conch-mcp
+        run: cargo check --workspace --exclude conch-shell --exclude conch-cli --exclude conch-mcp --exclude conch-grpc
 
   doc:
     name: Documentation
@@ -194,6 +194,10 @@ jobs:
           cargo run --package conch --example tool_execution --features embedded-shell --release
           echo "=== external_tools ==="
           cargo run --package conch --example external_tools --features embedded-shell --release
+          echo "=== approval_and_policy ==="
+          cargo run --package conch --example approval_and_policy --features embedded-shell --release
+          echo "=== policy_enforcement ==="
+          cargo run --package conch --example policy_enforcement --features embedded-shell --release
 
   # Test Go FFI bindings
   go-bindings:
