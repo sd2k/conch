@@ -7,8 +7,8 @@ config_roots = ["js"]
 [tools]
 rust = "1.92"
 
-[tools."cargo:wasm-tools"]
-version = "1"
+[tools."github:bytecodealliance/wasm-tools"]
+version = "1.236.1"
 
 # =============================================================================
 # Core development tasks
