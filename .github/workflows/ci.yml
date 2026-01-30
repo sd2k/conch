@@ -54,6 +54,9 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Configure Rust cache
+        uses: Swatinem/rust-cache@v2
+
       - name: Download WASM artifact
         uses: actions/download-artifact@v4
         with:
@@ -61,9 +64,6 @@ jobs:
           path: target/wasm32-wasip2/release/
 
       - uses: ./.github/actions/mark-wasm-current
-
-      - name: Configure Rust cache
-        uses: Swatinem/rust-cache@v2
 
       - uses: ./.github/actions/setup-rust
 
@@ -83,6 +83,9 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Configure Rust cache
+        uses: Swatinem/rust-cache@v2
+
       - name: Download WASM artifact
         uses: actions/download-artifact@v4
         with:
@@ -90,9 +93,6 @@ jobs:
           path: target/wasm32-wasip2/release/
 
       - uses: ./.github/actions/mark-wasm-current
-
-      - name: Configure Rust cache
-        uses: Swatinem/rust-cache@v2
 
       - uses: ./.github/actions/setup-rust
 
@@ -124,9 +124,9 @@ jobs:
             rust = "1.90"
 
       - name: Check MSRV
-        # Exclude conch-shell (WASM target) and packages requiring embedded-shell feature
-        # Don't use --all-features as embedded-shell requires the WASM artifact
-        run: cargo check --workspace --exclude conch-shell --exclude conch-cli --exclude conch-mcp --exclude conch-grpc
+        # Only check conch core without embedded-shell feature
+        # Other crates require embedded-shell which needs the WASM artifact
+        run: cargo check -p conch --no-default-features
 
   doc:
     name: Documentation
@@ -137,6 +137,9 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Configure Rust cache
+        uses: Swatinem/rust-cache@v2
+
       - name: Download WASM artifact
         uses: actions/download-artifact@v4
         with:
@@ -144,9 +147,6 @@ jobs:
           path: target/wasm32-wasip2/release/
 
       - uses: ./.github/actions/mark-wasm-current
-
-      - name: Configure Rust cache
-        uses: Swatinem/rust-cache@v2
 
       - uses: ./.github/actions/setup-rust
 
@@ -165,6 +165,9 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Configure Rust cache
+        uses: Swatinem/rust-cache@v2
+
       - name: Download WASM artifact
         uses: actions/download-artifact@v4
         with:
@@ -172,9 +175,6 @@ jobs:
           path: target/wasm32-wasip2/release/
 
       - uses: ./.github/actions/mark-wasm-current
-
-      - name: Configure Rust cache
-        uses: Swatinem/rust-cache@v2
 
       - uses: ./.github/actions/setup-rust
 
@@ -209,6 +209,9 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Configure Rust cache
+        uses: Swatinem/rust-cache@v2
+
       - name: Download WASM artifact
         uses: actions/download-artifact@v4
         with:
@@ -216,9 +219,6 @@ jobs:
           path: target/wasm32-wasip2/release/
 
       - uses: ./.github/actions/mark-wasm-current
-
-      - name: Configure Rust cache
-        uses: Swatinem/rust-cache@v2
 
       - uses: ./.github/actions/setup-rust
 

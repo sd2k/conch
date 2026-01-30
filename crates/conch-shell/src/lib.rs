@@ -193,7 +193,7 @@ mod tests {
 
         let mut shell = Shell::builder()
             .builtins(shell_builtins)
-            .fds(HashMap::from([(1.into(), null_out), (2.into(), null_err)]))
+            .fds(HashMap::from([(1, null_out), (2, null_err)]))
             .build()
             .await
             .map_err(|e| format!("failed to create shell: {}", e))?;
@@ -220,7 +220,7 @@ mod tests {
 
         let mut shell = Shell::builder()
             .builtins(shell_builtins)
-            .fds(HashMap::from([(1.into(), null_out), (2.into(), null_err)]))
+            .fds(HashMap::from([(1, null_out), (2, null_err)]))
             .build()
             .await
             .map_err(|e| format!("failed to create shell: {}", e))?;
