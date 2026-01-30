@@ -33,19 +33,20 @@ describe("tool builtin", () => {
   });
 
   it("invokes tool with basic params", () => {
-    const exitCode = execute('tool web_search --query "rust async"');
-    expect(exitCode).toBe(0);
+    const result = execute('tool web_search --query "rust async"');
+    expect(result.exitCode).toBe(0);
     expect(lastToolRequest).not.toBeNull();
     expect(lastToolRequest!.tool).toBe("web_search");
     const params = JSON.parse(lastToolRequest!.params);
     expect(params.query).toBe("rust async");
+    expect(result.stdout).toContain("web_search");
   });
 
   it("invokes tool with JSON params", () => {
-    const exitCode = execute(
+    const result = execute(
       'tool code_edit --json \'{"file": "main.rs", "line": 42}\'',
     );
-    expect(exitCode).toBe(0);
+    expect(result.exitCode).toBe(0);
     expect(lastToolRequest).not.toBeNull();
     expect(lastToolRequest!.tool).toBe("code_edit");
     const params = JSON.parse(lastToolRequest!.params);
@@ -54,21 +55,23 @@ describe("tool builtin", () => {
   });
 
   it("fails without tool name", () => {
-    const exitCode = execute("tool");
-    expect(exitCode).toBe(1);
+    const result = execute("tool");
+    expect(result.exitCode).toBe(1);
     // Handler should not have been called
     expect(lastToolRequest).toBeNull();
+    expect(result.stderr).toContain("missing tool name");
   });
 
   it("fails with option as tool name", () => {
-    const exitCode = execute("tool --query test");
-    expect(exitCode).toBe(1);
+    const result = execute("tool --query test");
+    expect(result.exitCode).toBe(1);
     expect(lastToolRequest).toBeNull();
+    expect(result.stderr).toContain("expected tool name");
   });
 
   it("receives piped stdin data", () => {
-    const exitCode = execute('echo "input data" | tool analyze --format json');
-    expect(exitCode).toBe(0);
+    const result = execute('echo "input data" | tool analyze --format json');
+    expect(result.exitCode).toBe(0);
     expect(lastToolRequest).not.toBeNull();
     expect(lastToolRequest!.tool).toBe("analyze");
     // stdin should contain the piped data
@@ -85,8 +88,9 @@ describe("tool builtin", () => {
       };
     });
 
-    const exitCode = execute("tool failing_tool");
-    expect(exitCode).toBe(1);
+    const result = execute("tool failing_tool");
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("Tool failed");
   });
 
   it("handles multiple tool calls in sequence", () => {
@@ -97,9 +101,9 @@ describe("tool builtin", () => {
     });
 
     // Run each tool call separately to avoid subshell issues
-    expect(execute("tool first_tool")).toBe(0);
-    expect(execute("tool second_tool")).toBe(0);
-    expect(execute("tool third_tool")).toBe(0);
+    expect(execute("tool first_tool").exitCode).toBe(0);
+    expect(execute("tool second_tool").exitCode).toBe(0);
+    expect(execute("tool third_tool").exitCode).toBe(0);
     expect(calls).toEqual(["first_tool", "second_tool", "third_tool"]);
   });
 
@@ -107,7 +111,8 @@ describe("tool builtin", () => {
     setToolHandler(() => {
       return { success: true, output: "tool result: success!" };
     });
-    const exitCode = execute('result=$(tool test_tool); echo "Got: $result"');
-    expect(exitCode).toBe(0);
+    const result = execute('result=$(tool test_tool); echo "Got: $result"');
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("Got: tool result: success!");
   });
 });

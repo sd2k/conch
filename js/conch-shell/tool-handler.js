@@ -66,12 +66,15 @@ export function getToolHandler() {
 }
 
 /**
- * Default export - the invoke function called by the WASM component.
+ * The invoke function called by the WASM component.
  * This is mapped via jco's --map option.
  *
  * @param {ToolRequest} request
  * @returns {ToolResult}
  */
-export default function invokeTool(request) {
+export function invokeTool(request) {
   return currentHandler(request);
 }
+
+// Also export as default for compatibility
+export default invokeTool;
