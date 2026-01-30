@@ -16,7 +16,7 @@ runs:
 
     - name: Install cargo-nextest
       shell: bash
-      run: cargo binstall --no-confirm cargo-nextest
+      run: cargo binstall --no-confirm --force cargo-nextest
 
     - name: Install mise
       uses: jdx/mise-action@v3
