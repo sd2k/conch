@@ -51,6 +51,7 @@
 
 mod continuation;
 mod history;
+#[cfg(feature = "embedded-shell")]
 mod sandbox;
 mod tools;
 mod vfs;
@@ -61,6 +62,7 @@ pub use history::{
     format_assistant_message, format_tool_call, format_tool_result, format_user_message,
     generate_history_index, parse_transcript_stats,
 };
+#[cfg(feature = "embedded-shell")]
 pub use sandbox::{AgentSandbox, AgentSandboxBuilder};
 pub use tools::{ToolDefinition, ToolRegistry, ToolSummary, VecToolRegistry, generate_index_txt};
 pub use vfs::{AgentMetadata, AgentVfs, AgentVfsBuilder};

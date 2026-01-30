@@ -4,6 +4,8 @@
 //! over stdio using JSON-RPC, catching issues like nested tokio runtimes
 //! that unit tests would miss.
 
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};

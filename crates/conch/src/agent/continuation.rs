@@ -235,6 +235,7 @@ fn days_to_ymd(days: u64) -> (u32, u32, u32) {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
 

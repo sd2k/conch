@@ -335,6 +335,7 @@ pub fn format_tool_result(result: &serde_json::Value) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
 

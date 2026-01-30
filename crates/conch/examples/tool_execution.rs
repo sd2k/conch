@@ -1,5 +1,7 @@
 //! Tool Execution Cycle Example
 //!
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+//!
 //! Demonstrates the callback-based tool invocation pattern:
 //! 1. Agent script invokes a tool via the `tool` builtin
 //! 2. The configured tool_handler callback is invoked immediately

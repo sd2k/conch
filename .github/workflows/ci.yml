@@ -71,8 +71,7 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Run clippy
-        # Allow expect_used/unwrap_used in tests (--all-targets includes tests)
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings -A clippy::expect_used -A clippy::unwrap_used
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   test:
     name: Test
@@ -100,35 +99,33 @@ jobs:
         # Exclude conch-grpc tests which have timing issues in CI
         run: cargo nextest run --workspace --all-features --exclude conch-grpc
 
-  # MSRV check is disabled until feature gating issues are fixed in the codebase
-  # (ToolHandler trait is used unconditionally but only exported with embedded-shell feature)
-  # msrv:
-  #   name: MSRV
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #       with:
-  #         persist-credentials: false
+  msrv:
+    name: MSRV
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
-  #     - name: Install protoc
-  #       run: |
-  #         sudo apt-get update
-  #         sudo apt-get install -y protobuf-compiler
+      - name: Install protoc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
 
-  #     - name: Configure Rust cache
-  #       uses: Swatinem/rust-cache@v2
+      - name: Configure Rust cache
+        uses: Swatinem/rust-cache@v2
 
-  #     - name: Install mise
-  #       uses: jdx/mise-action@v3
-  #       with:
-  #         mise_toml: |
-  #           [tools]
-  #           rust = "1.90"
+      - name: Install mise
+        uses: jdx/mise-action@v3
+        with:
+          mise_toml: |
+            [tools]
+            rust = "1.90"
 
-  #     - name: Check MSRV
-  #       # Only check conch core without embedded-shell feature
-  #       # Other crates require embedded-shell which needs the WASM artifact
-  #       run: cargo check -p conch --no-default-features
+      - name: Check MSRV
+        # Only check conch core without embedded-shell feature
+        # Other crates require embedded-shell which needs the WASM artifact
+        run: cargo check -p conch --no-default-features
 
   doc:
     name: Documentation

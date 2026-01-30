@@ -1,5 +1,7 @@
 //! External Tool Execution Example
 //!
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+//!
 //! Demonstrates how an orchestrator executes tools outside the sandbox,
 //! simulating a real agent loop where tool calls are handled by external
 //! systems (APIs, databases, file systems, etc.).
