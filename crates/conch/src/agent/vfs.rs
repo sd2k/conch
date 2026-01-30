@@ -681,7 +681,7 @@ mod tests {
         // Basic validation of year
         let year: u32 = timestamp[0..4].parse().expect("parse year");
         assert!(
-            year >= 2020 && year <= 2100,
+            (2020..=2100).contains(&year),
             "year should be reasonable: {}",
             year
         );
