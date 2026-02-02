@@ -63,9 +63,9 @@ cd ../testpkg && npm ci && npm run typecheck && npm run test:ci
 """
 
 [tasks.clean]
-description = "Clean JavaScript build artifacts"
+description = "Clean JavaScript build artifacts (generated files only)"
 dir = "conch-shell"
-run = "rm -rf *.wasm *.js *.d.ts interfaces"
+run = "rm -rf conch-shell.js conch-shell.d.ts conch-shell.core*.wasm interfaces"
 
 [tasks.publish]
 description = "Publish JavaScript package to npm"
