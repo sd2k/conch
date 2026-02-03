@@ -39,9 +39,53 @@ jco types \
   ../crates/conch-shell/wit/shell.wit
 """
 
+[tasks.patch-js]
+description = "Patch generated JS for webpack compatibility (node:fs/promises)"
+depends = ["transpile"]
+sources = ["conch-shell/conch-shell.js"]
+outputs = ["conch-shell/conch-shell.js"]
+run = """
+#!/usr/bin/env node
+const fs = require('fs');
+const path = 'conch-shell/conch-shell.js';
+let code = fs.readFileSync(path, 'utf8');
+
+// Patch the fetchCompile function for webpack compatibility
+// Original: _fs = _fs || await import('node:fs/promises');
+// Patched: wraps in try-catch and adds webpackIgnore comment
+const original = `  if (isNode) {
+    _fs = _fs || await import('node:fs/promises');
+    return WebAssembly.compile(await _fs.readFile(url));
+  }`;
+
+const patched = `  if (isNode) {
+    if (!_fs) {
+      try {
+        _fs = await import(/* webpackIgnore: true */ 'node:fs/promises');
+      } catch {
+        // Fallback for environments where node:fs/promises is unavailable
+      }
+    }
+    if (_fs) {
+      return WebAssembly.compile(await _fs.readFile(url));
+    }
+  }`;
+
+if (code.includes(original)) {
+  code = code.replace(original, patched);
+  fs.writeFileSync(path, code);
+  console.log('Patched conch-shell.js for webpack compatibility');
+} else if (code.includes('webpackIgnore')) {
+  console.log('conch-shell.js already patched');
+} else {
+  console.error('Warning: Could not find expected pattern in conch-shell.js');
+  process.exit(1);
+}
+"""
+
 [tasks.build]
 description = "Build JavaScript bindings (WASM + transpile + version sync)"
-depends = ["transpile"]
+depends = ["patch-js"]
 sources = ["conch-shell/conch-shell.js", "../Cargo.toml"]
 outputs = ["conch-shell/package.json"]
 run = """
