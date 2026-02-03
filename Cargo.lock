@@ -714,7 +714,7 @@ dependencies = [
 
 [[package]]
 name = "conch"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -735,7 +735,7 @@ dependencies = [
 
 [[package]]
 name = "conch-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "conch",
@@ -744,7 +744,7 @@ dependencies = [
 
 [[package]]
 name = "conch-grpc"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -765,7 +765,7 @@ dependencies = [
 
 [[package]]
 name = "conch-mcp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -781,7 +781,7 @@ dependencies = [
 
 [[package]]
 name = "conch-shell"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "brush-builtins",
  "brush-core",
