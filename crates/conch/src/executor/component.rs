@@ -25,8 +25,15 @@ use wasmtime::{Config, Engine, Store};
 use wasmtime_wasi::p2::pipe::MemoryOutputPipe;
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
+#[cfg(feature = "embedded-shell")]
+use crate::executor::registry::RegistryEntry;
 use crate::limits::ResourceLimits;
 use crate::runtime::{ExecutionResult, RuntimeError};
+
+#[cfg(feature = "embedded-shell")]
+use super::child;
+#[cfg(feature = "embedded-shell")]
+use super::registry::ComponentRegistry;
 
 // Generate host bindings for the shell component.
 wasmtime::component::bindgen!({
@@ -116,7 +123,7 @@ fn default_tool_handler(request: &ToolRequest) -> ToolResult {
 /// This state supports the Shell API with hybrid VFS that combines
 /// virtual storage with real filesystem mounts.
 #[cfg(feature = "embedded-shell")]
-pub struct HybridComponentState<S: VfsStorage + 'static> {
+pub struct HybridComponentState<S: VfsStorage + Clone + 'static> {
     wasi: WasiCtx,
     table: ResourceTable,
     stdout_pipe: MemoryOutputPipe,
@@ -128,16 +135,23 @@ pub struct HybridComponentState<S: VfsStorage + 'static> {
     limiter: StoreLimiter,
     hybrid_vfs_ctx: HybridVfsCtx<S>,
     tool_handler: Option<Arc<dyn ToolHandler>>,
+    /// Component registry for subprocess spawning.
+    component_registry: Option<Arc<ComponentRegistry>>,
+    /// Active child processes, keyed by resource rep.
+    children: std::collections::HashMap<u32, child::ChildProcess>,
+    /// Next child process ID.
+    next_child_id: u32,
 }
 
 #[cfg(feature = "embedded-shell")]
-impl<S: VfsStorage + 'static> HybridComponentState<S> {
+impl<S: VfsStorage + Clone + 'static> HybridComponentState<S> {
     /// Create a new hybrid component state with an optional tool handler.
     pub fn new(
         output_capacity: usize,
         max_memory_bytes: u64,
         hybrid_vfs_ctx: HybridVfsCtx<S>,
         tool_handler: Option<Arc<dyn ToolHandler>>,
+        component_registry: Option<Arc<ComponentRegistry>>,
     ) -> Self {
         let stdout_pipe = MemoryOutputPipe::new(output_capacity);
         let stderr_pipe = MemoryOutputPipe::new(output_capacity);
@@ -157,6 +171,9 @@ impl<S: VfsStorage + 'static> HybridComponentState<S> {
             limiter: StoreLimiter::new(max_memory_bytes),
             hybrid_vfs_ctx,
             tool_handler,
+            component_registry,
+            children: std::collections::HashMap::new(),
+            next_child_id: 0,
         }
     }
 
@@ -178,7 +195,7 @@ impl<S: VfsStorage + 'static> HybridComponentState<S> {
 }
 
 #[cfg(feature = "embedded-shell")]
-impl<S: VfsStorage + 'static> conch::shell::tools::Host for HybridComponentState<S> {
+impl<S: VfsStorage + Clone + 'static> conch::shell::tools::Host for HybridComponentState<S> {
     fn invoke_tool(&mut self, request: ToolRequest) -> ToolResult {
         // For synchronous trait, we need to block on the async handler.
         // We use futures::executor::block_on instead of tokio's block_on
@@ -193,7 +210,133 @@ impl<S: VfsStorage + 'static> conch::shell::tools::Host for HybridComponentState
 }
 
 #[cfg(feature = "embedded-shell")]
-impl<S: VfsStorage + 'static> WasiView for HybridComponentState<S> {
+impl<S: VfsStorage + Clone + 'static> conch::shell::process::Host for HybridComponentState<S> {}
+
+#[cfg(feature = "embedded-shell")]
+impl<S: VfsStorage + Clone + 'static> conch::shell::process::HostChild for HybridComponentState<S> {
+    fn spawn(
+        &mut self,
+        cmd: String,
+        args: Vec<String>,
+        env: Vec<(String, String)>,
+        cwd: String,
+    ) -> Result<
+        wasmtime::component::Resource<conch::shell::process::Child>,
+        conch::shell::process::ProcessError,
+    > {
+        use conch::shell::process::ProcessError;
+
+        let registry = self
+            .component_registry
+            .as_ref()
+            .ok_or(ProcessError::SpawnFailed)?;
+
+        let component_bytes = match registry
+            .get_bytes(&cmd)
+            .ok_or(ProcessError::CommandNotFound)?
+        {
+            RegistryEntry::Wasm(bytes) => child::ComponentBytes::Wasm(bytes),
+            RegistryEntry::CWasm(bytes) => child::ComponentBytes::Cwasm(bytes),
+        };
+
+        let child_process = child::spawn_child(
+            child::ComponentBytes::from(component_bytes),
+            &cmd,
+            &args,
+            &env,
+            &cwd,
+        )
+        .map_err(|e| {
+            eprintln!("[conch] spawn_child({cmd}) failed: {e}");
+            ProcessError::SpawnFailed
+        })?;
+
+        let id = self.next_child_id;
+        self.next_child_id += 1;
+        self.children.insert(id, child_process);
+
+        Ok(wasmtime::component::Resource::new_own(id))
+    }
+
+    fn write_stdin(
+        &mut self,
+        self_: wasmtime::component::Resource<conch::shell::process::Child>,
+        data: Vec<u8>,
+    ) -> Result<u64, conch::shell::process::ProcessError> {
+        use conch::shell::process::ProcessError;
+
+        let child = self
+            .children
+            .get_mut(&self_.rep())
+            .ok_or(ProcessError::IoError)?;
+
+        child.write_stdin(data).map_err(|_| ProcessError::IoError)
+    }
+
+    fn close_stdin(&mut self, self_: wasmtime::component::Resource<conch::shell::process::Child>) {
+        if let Some(child) = self.children.get_mut(&self_.rep()) {
+            child.close_stdin();
+        }
+    }
+
+    fn read_stdout(
+        &mut self,
+        self_: wasmtime::component::Resource<conch::shell::process::Child>,
+        _max_bytes: u32,
+    ) -> Result<Vec<u8>, conch::shell::process::ProcessError> {
+        use conch::shell::process::ProcessError;
+
+        let child = self
+            .children
+            .get_mut(&self_.rep())
+            .ok_or(ProcessError::IoError)?;
+
+        Ok(child.read_stdout())
+    }
+
+    fn read_stderr(
+        &mut self,
+        self_: wasmtime::component::Resource<conch::shell::process::Child>,
+        _max_bytes: u32,
+    ) -> Result<Vec<u8>, conch::shell::process::ProcessError> {
+        use conch::shell::process::ProcessError;
+
+        let child = self
+            .children
+            .get_mut(&self_.rep())
+            .ok_or(ProcessError::IoError)?;
+
+        Ok(child.read_stderr())
+    }
+
+    fn wait(
+        &mut self,
+        self_: wasmtime::component::Resource<conch::shell::process::Child>,
+    ) -> Result<i32, conch::shell::process::ProcessError> {
+        use conch::shell::process::ProcessError;
+
+        let child = self
+            .children
+            .get_mut(&self_.rep())
+            .ok_or(ProcessError::IoError)?;
+
+        child.wait().map_err(|e| {
+            tracing::error!("child process wait failed: {e}");
+            ProcessError::IoError
+        })
+    }
+
+    fn drop(
+        &mut self,
+        self_: wasmtime::component::Resource<conch::shell::process::Child>,
+    ) -> wasmtime::Result<()> {
+        self.children.remove(&self_.rep());
+        Ok(())
+    }
+}
+
+#[cfg(feature = "embedded-shell")]
+impl<S: VfsStorage + Clone + 'static> WasiView for HybridComponentState<S> {
     fn ctx(&mut self) -> WasiCtxView<'_> {
         WasiCtxView {
             ctx: &mut self.wasi,
@@ -203,7 +346,7 @@ impl<S: VfsStorage + 'static> WasiView for HybridComponentState<S> {
 }
 
 #[cfg(feature = "embedded-shell")]
-impl<S: VfsStorage + 'static> HybridVfsView for HybridComponentState<S> {
+impl<S: VfsStorage + Clone + 'static> HybridVfsView for HybridComponentState<S> {
     type Storage = S;
 
     fn hybrid_vfs(&mut self) -> HybridVfsState<'_, Self::Storage> {
@@ -219,7 +362,7 @@ impl<S: VfsStorage + 'static> HybridVfsView for HybridComponentState<S> {
 #[derive(Clone)]
 pub struct ComponentShellExecutor {
     engine: Arc<Engine>,
-    component_bytes: Arc<Vec<u8>>,
+    component: Arc<Component>,
 }
 
 impl std::fmt::Debug for ComponentShellExecutor {
@@ -240,19 +383,48 @@ impl ComponentShellExecutor {
     /// Create a new executor by loading a component from bytes.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, RuntimeError> {
         let engine = Self::create_engine()?;
-        // Validate the component can be loaded
-        Component::new(&engine, bytes).map_err(|e| RuntimeError::Wasm(e.to_string()))?;
+        let component =
+            Component::new(&engine, bytes).map_err(|e| RuntimeError::Wasm(e.to_string()))?;
         Ok(Self {
             engine: Arc::new(engine),
-            component_bytes: Arc::new(bytes.to_vec()),
+            component: Arc::new(component),
+        })
+    }
+
+    /// Create a new executor from pre-compiled (cwasm) bytes.
+    ///
+    /// # Safety
+    ///
+    /// The cwasm bytes must have been produced by `wasmtime compile` with
+    /// a compatible engine configuration (epoch-interruption enabled).
+    pub unsafe fn from_cwasm(bytes: &[u8]) -> Result<Self, RuntimeError> {
+        let engine = Self::create_engine()?;
+        let component = unsafe {
+            Component::deserialize(&engine, bytes)
+                .map_err(|e| RuntimeError::Wasm(format!("failed to deserialize cwasm: {e}")))?
+        };
+        Ok(Self {
+            engine: Arc::new(engine),
+            component: Arc::new(component),
         })
     }
 
     /// Create a new executor using the embedded WASM component.
     ///
     /// This is only available when built with the `embedded-shell` feature.
+    /// Tries to load a pre-compiled cwasm first for faster startup.
     #[cfg(feature = "embedded-shell")]
     pub fn embedded() -> Result<Self, RuntimeError> {
+        // Try cwasm first (much faster — skips JIT compilation)
+        let cwasm_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../target/wasm32-wasip2/release/conch_shell.cwasm"
+        );
+        if let Ok(cwasm_bytes) = std::fs::read(cwasm_path) {
+            if let Ok(executor) = (unsafe { Self::from_cwasm(&cwasm_bytes) }) {
+                return Ok(executor);
+            }
+        }
         Self::from_bytes(EMBEDDED_COMPONENT)
     }
 
@@ -265,7 +437,6 @@ impl ComponentShellExecutor {
     /// Create an engine with the appropriate configuration.
     fn create_engine() -> Result<Engine, RuntimeError> {
         let mut config = Config::new();
-        config.async_support(true);
         config.epoch_interruption(true);
         Engine::new(&config).map_err(|e| RuntimeError::Wasm(e.to_string()))
     }
@@ -299,7 +470,7 @@ impl ComponentShellExecutor {
     /// instance.execute("echo $x").await?;  // Outputs "42"
     /// ```
     #[cfg(feature = "embedded-shell")]
-    pub async fn create_instance<S: VfsStorage + 'static>(
+    pub async fn create_instance<S: VfsStorage + Clone + 'static>(
         &self,
         limits: &ResourceLimits,
         hybrid_ctx: HybridVfsCtx<S>,
@@ -307,10 +478,31 @@ impl ComponentShellExecutor {
     ) -> Result<ShellInstance<S>, RuntimeError> {
         ShellInstance::new(
             self.engine.clone(),
-            self.component_bytes.clone(),
+            self.component.clone(),
             limits,
             hybrid_ctx,
             tool_handler,
+            None,
+        )
+        .await
+    }
+
+    /// Create a persistent shell instance with a component registry for subprocess spawning.
+    #[cfg(feature = "embedded-shell")]
+    pub async fn create_instance_with_registry<S: VfsStorage + Clone + 'static>(
+        &self,
+        limits: &ResourceLimits,
+        hybrid_ctx: HybridVfsCtx<S>,
+        tool_handler: Option<Arc<dyn ToolHandler>>,
+        registry: Arc<ComponentRegistry>,
+    ) -> Result<ShellInstance<S>, RuntimeError> {
+        ShellInstance::new(
+            self.engine.clone(),
+            self.component.clone(),
+            limits,
+            hybrid_ctx,
+            tool_handler,
+            Some(registry),
         )
         .await
     }
@@ -326,7 +518,7 @@ impl ComponentShellExecutor {
 /// - Filesystem (via HybridVfsCtx)
 /// - Shell state (variables, functions, aliases)
 #[cfg(feature = "embedded-shell")]
-pub struct ShellInstance<S: VfsStorage + 'static> {
+pub struct ShellInstance<S: VfsStorage + Clone + 'static> {
     store: Store<HybridComponentState<S>>,
     shell_resource: wasmtime::component::ResourceAny,
     bindings: ShellSandbox,
@@ -334,21 +526,22 @@ pub struct ShellInstance<S: VfsStorage + 'static> {
 }
 
 #[cfg(feature = "embedded-shell")]
-impl<S: VfsStorage + 'static> std::fmt::Debug for ShellInstance<S> {
+impl<S: VfsStorage + Clone + 'static> std::fmt::Debug for ShellInstance<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ShellInstance").finish_non_exhaustive()
     }
 }
 
 #[cfg(feature = "embedded-shell")]
-impl<S: VfsStorage + 'static> ShellInstance<S> {
+impl<S: VfsStorage + Clone + 'static> ShellInstance<S> {
     /// Create a new shell instance.
     async fn new(
         engine: Arc<Engine>,
-        component_bytes: Arc<Vec<u8>>,
+        component: Arc<Component>,
         limits: &ResourceLimits,
         hybrid_ctx: HybridVfsCtx<S>,
         tool_handler: Option<Arc<dyn ToolHandler>>,
+        component_registry: Option<Arc<ComponentRegistry>>,
     ) -> Result<Self, RuntimeError> {
         // Create state with hybrid VFS context
         let state = HybridComponentState::new(
@@ -356,6 +549,7 @@ impl<S: VfsStorage + 'static> ShellInstance<S> {
             limits.max_memory_bytes,
             hybrid_ctx,
             tool_handler,
+            component_registry,
         );
 
         let mut store = Store::new(&engine, state);
@@ -378,11 +572,7 @@ impl<S: VfsStorage + 'static> ShellInstance<S> {
         .map_err(|e| RuntimeError::Wasm(e.to_string()))?;
         linker.allow_shadowing(false);
 
-        // Load the component
-        let component = Component::new(&engine, &*component_bytes)
-            .map_err(|e| RuntimeError::Wasm(e.to_string()))?;
-
-        // Instantiate the component
+        // Instantiate the pre-compiled component
         let bindings = ShellSandbox::instantiate_async(&mut store, &component, &linker)
             .await
             .map_err(|e| RuntimeError::Wasm(format!("instantiation failed: {}", e)))?;
@@ -537,7 +727,7 @@ impl wasmtime::ResourceLimiter for StoreLimiter {
         current: usize,
         desired: usize,
         _maximum: Option<usize>,
-    ) -> anyhow::Result<bool> {
+    ) -> wasmtime::Result<bool> {
         Ok(desired as u64 <= self.max_memory || current == desired)
     }
 
@@ -546,7 +736,7 @@ impl wasmtime::ResourceLimiter for StoreLimiter {
         _current: usize,
         _desired: usize,
         _maximum: Option<usize>,
-    ) -> anyhow::Result<bool> {
+    ) -> wasmtime::Result<bool> {
         Ok(true)
     }
 }
@@ -556,13 +746,13 @@ impl wasmtime::ResourceLimiter for StoreLimiter {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
-    use eryx_vfs::{DirPerms, FilePerms, InMemoryStorage};
+    use eryx_vfs::{ArcStorage, DirPerms, FilePerms, InMemoryStorage};
 
-    async fn create_test_instance() -> ShellInstance<InMemoryStorage> {
+    async fn create_test_instance() -> ShellInstance<ArcStorage> {
         let executor = ComponentShellExecutor::embedded().expect("Failed to create executor");
         let limits = ResourceLimits::default();
 
-        let storage = Arc::new(InMemoryStorage::new());
+        let storage = ArcStorage::new(Arc::new(InMemoryStorage::new()));
         let mut hybrid_ctx = HybridVfsCtx::new(storage);
         hybrid_ctx.add_vfs_preopen("/scratch", DirPerms::all(), FilePerms::all());
 

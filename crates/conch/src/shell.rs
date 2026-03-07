@@ -213,6 +213,8 @@ pub struct ShellBuilder {
     executor: Option<ComponentShellExecutor>,
     #[cfg(feature = "embedded-shell")]
     tool_handler: Option<Arc<dyn ToolHandler>>,
+    #[cfg(feature = "embedded-shell")]
+    component_registry: Option<Arc<crate::executor::ComponentRegistry>>,
     limits: Option<ResourceLimits>,
 }
 
@@ -225,6 +227,8 @@ impl std::fmt::Debug for ShellBuilder {
             .field("has_executor", &self.executor.is_some());
         #[cfg(feature = "embedded-shell")]
         s.field("has_tool_handler", &self.tool_handler.is_some());
+        #[cfg(feature = "embedded-shell")]
+        s.field("has_component_registry", &self.component_registry.is_some());
         s.finish()
     }
 }
@@ -247,6 +251,8 @@ impl ShellBuilder {
             executor: None,
             #[cfg(feature = "embedded-shell")]
             tool_handler: None,
+            #[cfg(feature = "embedded-shell")]
+            component_registry: None,
             limits: None,
         }
     }
@@ -346,6 +352,34 @@ impl ShellBuilder {
         self
     }
 
+    /// Set a component registry for subprocess spawning.
+    ///
+    /// When a shell script runs an unknown command, the registry is consulted
+    /// to find a WASI component to instantiate for that command.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use conch::{Shell, ComponentRegistry};
+    /// use wasmtime::component::Component;
+    ///
+    /// let mut registry = ComponentRegistry::new();
+    /// registry.register("upper", component);
+    ///
+    /// let mut shell = Shell::builder()
+    ///     .component_registry(registry)
+    ///     .build()
+    ///     .await?;
+    ///
+    /// // "upper" is now available as a command
+    /// shell.execute("echo hello | upper", &limits).await?;
+    /// ```
+    #[cfg(feature = "embedded-shell")]
+    pub fn component_registry(mut self, registry: crate::executor::ComponentRegistry) -> Self {
+        self.component_registry = Some(Arc::new(registry));
+        self
+    }
+
     /// Build the shell with the configured settings.
     ///
     /// This is an async operation because it creates and initializes the WASM
@@ -389,7 +423,7 @@ impl ShellBuilder {
         };
 
         // Build HybridVfsCtx - wrap in Arc for HybridVfsCtx which expects Arc<S>
-        let mut hybrid_ctx = HybridVfsCtx::new(Arc::new(vfs.clone()));
+        let mut hybrid_ctx = HybridVfsCtx::new(vfs.clone());
 
         // Add VFS mounts
         for mount in &vfs_mounts {
@@ -414,9 +448,20 @@ impl ShellBuilder {
         let limits = self.limits.unwrap_or_default();
 
         // Create the persistent shell instance
-        let instance = executor
-            .create_instance(&limits, hybrid_ctx, self.tool_handler)
-            .await?;
+        let instance = if let Some(registry) = self.component_registry {
+            executor
+                .create_instance_with_registry(
+                    &limits,
+                    hybrid_ctx,
+                    self.tool_handler,
+                    registry,
+                )
+                .await?
+        } else {
+            executor
+                .create_instance(&limits, hybrid_ctx, self.tool_handler)
+                .await?
+        };
 
         Ok(Shell {
             instance,

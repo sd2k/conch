@@ -60,6 +60,9 @@ pub use executor::ShellInstance;
 // Tool handler types (for tool invocation from shell scripts)
 pub use executor::{ToolHandler, ToolRequest, ToolResult};
 
+// Component registry for subprocess spawning
+pub use executor::{ComponentRegistry, SharedRegistry};
+
 // Resource limits
 pub use limits::ResourceLimits;
 
@@ -67,4 +70,4 @@ pub use limits::ResourceLimits;
 pub use runtime::{Conch, ExecutionResult, ExecutionStats, RuntimeError};
 
 // Re-export eryx-vfs types for VFS storage
-pub use eryx_vfs::{DirPerms, FilePerms, InMemoryStorage, VfsStorage};
+pub use eryx_vfs::{ArcStorage, DirPerms, FilePerms, InMemoryStorage, VfsStorage};

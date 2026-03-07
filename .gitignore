@@ -35,3 +35,4 @@
 
 # Pre-compiled WASM artifacts
 *.cwasm
+scratch/
