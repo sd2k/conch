@@ -98,6 +98,27 @@ impl exports::conch::shell::shell::GuestInstance for ShellInstance {
                 .expect("failed to create shell")
         });
 
+        // Set up the external command spawn handler to call back to the host
+        // via the WIT process interface. Only on WASI targets where the stubs
+        // process module provides the handler mechanism.
+        #[cfg(target_family = "wasm")]
+        brush_core::sys::process::set_spawn_handler(Box::new(|cmd, args, env, cwd| {
+            use conch::shell::process::{Child, ProcessError};
+
+            let args_owned: Vec<String> = args.to_vec();
+            let env_tuples: Vec<(String, String)> = env;
+
+            match Child::spawn(cmd, &args_owned, &env_tuples, cwd) {
+                Ok(child) => Ok(Box::new(WitChildWrapper { child: RefCell::new(child) })),
+                Err(ProcessError::CommandNotFound) => {
+                    Err(brush_core::sys::process::SpawnError::NotFound(cmd.to_string()))
+                }
+                Err(e) => {
+                    Err(brush_core::sys::process::SpawnError::Failed(format!("{e:?}")))
+                }
+            }
+        }));
+
         Self {
             shell: RefCell::new(shell),
             last_exit_code: RefCell::new(0),
@@ -158,6 +179,60 @@ impl exports::conch::shell::shell::GuestInstance for ShellInstance {
     /// Get the exit code from the last executed command.
     fn last_exit_code(&self) -> i32 {
         *self.last_exit_code.borrow()
+    }
+}
+
+/// Wrapper that bridges the WIT `Child` resource to brush-core's `ExternalChild` trait.
+///
+/// Each method delegates to the corresponding WIT resource method, which calls
+/// back to the host via the component model.
+#[cfg(target_family = "wasm")]
+struct WitChildWrapper {
+    child: RefCell<conch::shell::process::Child>,
+}
+
+#[cfg(target_family = "wasm")]
+impl brush_core::sys::process::ExternalChild for WitChildWrapper {
+    fn write_stdin(&mut self, data: &[u8]) -> Result<usize, std::io::Error> {
+        let child = self.child.borrow();
+        match child.write_stdin(data) {
+            Ok(n) => Ok(n as usize),
+            Err(_) => Err(std::io::Error::other("write_stdin failed")),
+        }
+    }
+
+    fn close_stdin(&mut self) {
+        let child = self.child.borrow();
+        child.close_stdin();
+    }
+
+    fn read_stdout(&mut self, buf: &mut [u8]) -> Result<usize, std::io::Error> {
+        let child = self.child.borrow();
+        match child.read_stdout(buf.len() as u32) {
+            Ok(data) => {
+                let len = data.len().min(buf.len());
+                buf[..len].copy_from_slice(&data[..len]);
+                Ok(len)
+            }
+            Err(_) => Err(std::io::Error::other("read_stdout failed")),
+        }
+    }
+
+    fn read_stderr(&mut self, buf: &mut [u8]) -> Result<usize, std::io::Error> {
+        let child = self.child.borrow();
+        match child.read_stderr(buf.len() as u32) {
+            Ok(data) => {
+                let len = data.len().min(buf.len());
+                buf[..len].copy_from_slice(&data[..len]);
+                Ok(len)
+            }
+            Err(_) => Err(std::io::Error::other("read_stderr failed")),
+        }
+    }
+
+    fn wait(&mut self) -> Result<i32, std::io::Error> {
+        let child = self.child.borrow();
+        child.wait().map_err(|_| std::io::Error::other("wait failed"))
     }
 }
 

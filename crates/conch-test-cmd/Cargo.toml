@@ -1,0 +1,11 @@
+[package]
+name = "conch-test-cmd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Test command component for conch subprocess spawning"
+
+[[bin]]
+name = "conch-test-cmd"
+path = "src/main.rs"

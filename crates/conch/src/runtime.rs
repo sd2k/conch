@@ -3,7 +3,7 @@
 use std::fmt;
 use std::sync::Arc;
 
-use eryx_vfs::{DirPerms, FilePerms, HybridVfsCtx, InMemoryStorage};
+use eryx_vfs::{ArcStorage, DirPerms, FilePerms, HybridVfsCtx, InMemoryStorage};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::Semaphore;
@@ -138,7 +138,7 @@ impl Conch {
             .map_err(|_| RuntimeError::Semaphore)?;
 
         // Create a minimal VFS context with a /tmp directory
-        let storage = Arc::new(InMemoryStorage::new());
+        let storage = ArcStorage::new(Arc::new(InMemoryStorage::new()));
         let mut hybrid_ctx = HybridVfsCtx::new(storage);
         hybrid_ctx.add_vfs_preopen("/tmp", DirPerms::all(), FilePerms::all());
 

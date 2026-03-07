@@ -1,0 +1,757 @@
+diff --git a/brush-core/src/commands.rs b/brush-core/src/commands.rs
+index dcf35b8..5ce50a4 100644
+--- a/brush-core/src/commands.rs
++++ b/brush-core/src/commands.rs
+@@ -418,6 +418,15 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
+             }
+         }
+ 
++        // On WASI, try the external spawn handler before PATH search.
++        // This allows the host to intercept commands and run them as WASI components.
++        #[cfg(target_os = "wasi")]
++        {
++            if let Some(result) = self.try_execute_via_spawn_handler().await {
++                return result;
++            }
++        }
++
+         // We still haven't found a command to invoke. We'll need to look for an external command.
+         if !self.command_name.contains(std::path::MAIN_SEPARATOR) {
+             // All else failed; if we were given path directories to search, try to look through
+@@ -570,6 +579,146 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
+         result
+     }
+ 
++    /// Try to execute the command via the WASI spawn handler.
++    ///
++    /// Returns `None` if no handler is registered or the command was not found.
++    /// Returns `Some(Ok(...))` if the command was executed successfully.
++    /// Returns `Some(Err(...))` if execution failed.
++    #[cfg(target_os = "wasi")]
++    async fn try_execute_via_spawn_handler(
++        &mut self,
++    ) -> Option<Result<ExecutionSpawnResult, error::Error>> {
++        use std::io::{Read, Write};
++
++        // Collect string args (skip argv[0] which is the command name)
++        let args: Vec<String> = self.args[1..]
++            .iter()
++            .filter_map(|a| {
++                if let CommandArg::String(s) = a {
++                    Some(s.clone())
++                } else {
++                    None
++                }
++            })
++            .collect();
++
++        // Collect exported environment variables
++        let env: Vec<(String, String)> = self
++            .shell
++            .env()
++            .iter_exported()
++            .filter_map(|(k, v)| {
++                if v.value().is_set() {
++                    Some((
++                        k.to_string(),
++                        v.value().to_cow_str(&*self.shell).into_owned(),
++                    ))
++                } else {
++                    None
++                }
++            })
++            .collect();
++
++        let cwd = self.shell.working_dir().to_string_lossy().to_string();
++
++        let spawn_result =
++            sys::process::try_spawn(&self.command_name, &args, env, &cwd)?;
++
++        match spawn_result {
++            Ok(mut child) => {
++                // Batch approach: read available stdin, write to child, close, wait, read output
++
++                // Read available stdin data and forward to child.
++                // We use chunked reads instead of read_to_end because on WASM,
++                // pipe fds are Arc-based and EOF may not be signaled if other
++                // clones of the write end still exist in the pipeline params.
++                let mut stdin_data = Vec::new();
++                let mut stdin = self.params.stdin(&self.shell);
++                let mut buf = [0u8; 65536];
++                loop {
++                    match stdin.read(&mut buf) {
++                        Ok(0) => break,           // EOF
++                        Ok(n) => stdin_data.extend_from_slice(&buf[..n]),
++                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
++                        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
++                        Err(_) => break,
++                    }
++                    // On WASM, pipe reads are non-blocking once buffered data is consumed.
++                    // After reading available data, break to avoid blocking on EOF.
++                    if stdin_data.len() >= buf.len() {
++                        // We read a full chunk; there might be more. Continue.
++                        continue;
++                    }
++                    // Read less than a full chunk — likely all data consumed.
++                    break;
++                }
++                drop(stdin);
++                if !stdin_data.is_empty() {
++                    if let Err(e) = child.write_stdin(&stdin_data) {
++                        let mut stderr = self.params.stderr(&self.shell);
++                        let _ = writeln!(stderr, "{}: write error: {e}", self.command_name);
++                        return Some(Ok(ExecutionSpawnResult::Completed(
++                            ExecutionResult::new(1),
++                        )));
++                    }
++                }
++                child.close_stdin();
++
++                // Wait for child to complete
++                match child.wait() {
++                    Ok(exit_code) => {
++                        // Read stdout and write to our stdout
++                        let mut stdout_buf = [0u8; 65536];
++                        loop {
++                            match child.read_stdout(&mut stdout_buf) {
++                                Ok(0) => break,
++                                Ok(n) => {
++                                    let mut stdout = self.params.stdout(&self.shell);
++                                    let _ = stdout.write_all(&stdout_buf[..n]);
++                                }
++                                Err(_) => break,
++                            }
++                        }
++
++                        // Read stderr and write to our stderr
++                        loop {
++                            match child.read_stderr(&mut stdout_buf) {
++                                Ok(0) => break,
++                                Ok(n) => {
++                                    let mut stderr = self.params.stderr(&self.shell);
++                                    let _ = stderr.write_all(&stdout_buf[..n]);
++                                }
++                                Err(_) => break,
++                            }
++                        }
++
++                        Some(Ok(ExecutionSpawnResult::Completed(
++                            ExecutionResult::new(u8::try_from(exit_code).unwrap_or(if exit_code == 0 { 0 } else { 1 })),
++                        )))
++                    }
++                    Err(e) => {
++                        let mut stderr = self.params.stderr(&self.shell);
++                        let _ = writeln!(stderr, "{}: {e}", self.command_name);
++                        Some(Ok(ExecutionSpawnResult::Completed(
++                            ExecutionResult::new(1),
++                        )))
++                    }
++                }
++            }
++            Err(sys::process::SpawnError::NotFound(_)) => {
++                // Not found in registry, fall through to PATH search
++                None
++            }
++            Err(sys::process::SpawnError::Failed(msg)) => {
++                Some(Err(ErrorKind::FailedToExecuteCommand(
++                    self.command_name.clone(),
++                    std::io::Error::other(msg),
++                )
++                .into()))
++            }
++        }
++    }
++
+     fn execute_via_external(self, path: &Path) -> Result<ExecutionSpawnResult, error::Error> {
+         let mut shell = self.shell;
+ 
+diff --git a/brush-core/src/sys/stubs/process.rs b/brush-core/src/sys/stubs/process.rs
+index ac44aad..a14ae12 100644
+--- a/brush-core/src/sys/stubs/process.rs
++++ b/brush-core/src/sys/stubs/process.rs
+@@ -1,5 +1,7 @@
+ //! Process management utilities
+ 
++use std::cell::RefCell;
++
+ pub(crate) type ProcessId = i32;
+ 
+ /// Provides access to a child process.
+@@ -32,3 +34,79 @@ pub(crate) fn spawn(mut command: std::process::Command) -> std::io::Result<Child
+     let child = command.spawn()?;
+     Ok(Child { inner: child })
+ }
++
++// ============================================================================
++// External command spawn handler for WASI environments
++// ============================================================================
++
++/// Errors from spawning an external command.
++#[derive(Debug)]
++pub enum SpawnError {
++    /// The command was not found in the registry.
++    NotFound(String),
++    /// Spawning failed for some other reason.
++    Failed(String),
++}
++
++impl std::fmt::Display for SpawnError {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        match self {
++            Self::NotFound(cmd) => write!(f, "command not found: {cmd}"),
++            Self::Failed(msg) => write!(f, "spawn failed: {msg}"),
++        }
++    }
++}
++
++/// Trait for a child process spawned via the external handler.
++///
++/// Implementations bridge to the host's subprocess spawning mechanism
++/// (e.g., WIT process interface).
++pub trait ExternalChild {
++    /// Write data to the child's stdin.
++    fn write_stdin(&mut self, data: &[u8]) -> Result<usize, std::io::Error>;
++    /// Close the child's stdin, signaling EOF.
++    fn close_stdin(&mut self);
++    /// Read from the child's stdout.
++    fn read_stdout(&mut self, buf: &mut [u8]) -> Result<usize, std::io::Error>;
++    /// Read from the child's stderr.
++    fn read_stderr(&mut self, buf: &mut [u8]) -> Result<usize, std::io::Error>;
++    /// Wait for the child to exit and return its exit code.
++    fn wait(&mut self) -> Result<i32, std::io::Error>;
++}
++
++/// Result type for the spawn handler.
++pub type SpawnResult = Result<Box<dyn ExternalChild>, SpawnError>;
++
++/// Function type for the external command spawn handler.
++pub type SpawnFn = Box<dyn Fn(&str, &[String], Vec<(String, String)>, &str) -> SpawnResult>;
++
++thread_local! {
++    static SPAWN_HANDLER: RefCell<Option<SpawnFn>> = const { RefCell::new(None) };
++}
++
++/// Set the external command spawn handler.
++///
++/// When the shell encounters an unknown command on WASI, it calls this handler
++/// before returning "command not found".
++pub fn set_spawn_handler(f: SpawnFn) {
++    SPAWN_HANDLER.with(|h| {
++        *h.borrow_mut() = Some(f);
++    });
++}
++
++/// Try to spawn an external command via the registered handler.
++///
++/// Returns `None` if no handler is registered.
++/// Returns `Some(Ok(child))` if the handler spawned the command.
++/// Returns `Some(Err(e))` if the handler was registered but failed.
++pub fn try_spawn(
++    cmd: &str,
++    args: &[String],
++    env: Vec<(String, String)>,
++    cwd: &str,
++) -> Option<SpawnResult> {
++    SPAWN_HANDLER.with(|h| {
++        let handler = h.borrow();
++        handler.as_ref().map(|f| f(cmd, args, env, cwd))
++    })
++}
+diff --git a/patches/brush-subprocess.patch b/patches/brush-subprocess.patch
+new file mode 100644
+index 0000000..e696904
+--- /dev/null
++++ b/patches/brush-subprocess.patch
+@@ -0,0 +1,259 @@
++diff --git a/brush-core/src/commands.rs b/brush-core/src/commands.rs
++index dcf35b8..5ce50a4 100644
++--- a/brush-core/src/commands.rs
+++++ b/brush-core/src/commands.rs
++@@ -418,6 +418,15 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
++             }
++         }
++ 
+++        // On WASI, try the external spawn handler before PATH search.
+++        // This allows the host to intercept commands and run them as WASI components.
+++        #[cfg(target_os = "wasi")]
+++        {
+++            if let Some(result) = self.try_execute_via_spawn_handler().await {
+++                return result;
+++            }
+++        }
+++
++         // We still haven't found a command to invoke. We'll need to look for an external command.
++         if !self.command_name.contains(std::path::MAIN_SEPARATOR) {
++             // All else failed; if we were given path directories to search, try to look through
++@@ -570,6 +579,146 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
++         result
++     }
++ 
+++    /// Try to execute the command via the WASI spawn handler.
+++    ///
+++    /// Returns `None` if no handler is registered or the command was not found.
+++    /// Returns `Some(Ok(...))` if the command was executed successfully.
+++    /// Returns `Some(Err(...))` if execution failed.
+++    #[cfg(target_os = "wasi")]
+++    async fn try_execute_via_spawn_handler(
+++        &mut self,
+++    ) -> Option<Result<ExecutionSpawnResult, error::Error>> {
+++        use std::io::{Read, Write};
+++
+++        // Collect string args (skip argv[0] which is the command name)
+++        let args: Vec<String> = self.args[1..]
+++            .iter()
+++            .filter_map(|a| {
+++                if let CommandArg::String(s) = a {
+++                    Some(s.clone())
+++                } else {
+++                    None
+++                }
+++            })
+++            .collect();
+++
+++        // Collect exported environment variables
+++        let env: Vec<(String, String)> = self
+++            .shell
+++            .env()
+++            .iter_exported()
+++            .filter_map(|(k, v)| {
+++                if v.value().is_set() {
+++                    Some((
+++                        k.to_string(),
+++                        v.value().to_cow_str(&*self.shell).into_owned(),
+++                    ))
+++                } else {
+++                    None
+++                }
+++            })
+++            .collect();
+++
+++        let cwd = self.shell.working_dir().to_string_lossy().to_string();
+++
+++        let spawn_result =
+++            sys::process::try_spawn(&self.command_name, &args, env, &cwd)?;
+++
+++        match spawn_result {
+++            Ok(mut child) => {
+++                // Batch approach: read available stdin, write to child, close, wait, read output
+++
+++                // Read available stdin data and forward to child.
+++                // We use chunked reads instead of read_to_end because on WASM,
+++                // pipe fds are Arc-based and EOF may not be signaled if other
+++                // clones of the write end still exist in the pipeline params.
+++                let mut stdin_data = Vec::new();
+++                let mut stdin = self.params.stdin(&self.shell);
+++                let mut buf = [0u8; 65536];
+++                loop {
+++                    match stdin.read(&mut buf) {
+++                        Ok(0) => break,           // EOF
+++                        Ok(n) => stdin_data.extend_from_slice(&buf[..n]),
+++                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+++                        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+++                        Err(_) => break,
+++                    }
+++                    // On WASM, pipe reads are non-blocking once buffered data is consumed.
+++                    // After reading available data, break to avoid blocking on EOF.
+++                    if stdin_data.len() >= buf.len() {
+++                        // We read a full chunk; there might be more. Continue.
+++                        continue;
+++                    }
+++                    // Read less than a full chunk — likely all data consumed.
+++                    break;
+++                }
+++                drop(stdin);
+++                if !stdin_data.is_empty() {
+++                    if let Err(e) = child.write_stdin(&stdin_data) {
+++                        let mut stderr = self.params.stderr(&self.shell);
+++                        let _ = writeln!(stderr, "{}: write error: {e}", self.command_name);
+++                        return Some(Ok(ExecutionSpawnResult::Completed(
+++                            ExecutionResult::new(1),
+++                        )));
+++                    }
+++                }
+++                child.close_stdin();
+++
+++                // Wait for child to complete
+++                match child.wait() {
+++                    Ok(exit_code) => {
+++                        // Read stdout and write to our stdout
+++                        let mut stdout_buf = [0u8; 65536];
+++                        loop {
+++                            match child.read_stdout(&mut stdout_buf) {
+++                                Ok(0) => break,
+++                                Ok(n) => {
+++                                    let mut stdout = self.params.stdout(&self.shell);
+++                                    let _ = stdout.write_all(&stdout_buf[..n]);
+++                                }
+++                                Err(_) => break,
+++                            }
+++                        }
+++
+++                        // Read stderr and write to our stderr
+++                        loop {
+++                            match child.read_stderr(&mut stdout_buf) {
+++                                Ok(0) => break,
+++                                Ok(n) => {
+++                                    let mut stderr = self.params.stderr(&self.shell);
+++                                    let _ = stderr.write_all(&stdout_buf[..n]);
+++                                }
+++                                Err(_) => break,
+++                            }
+++                        }
+++
+++                        Some(Ok(ExecutionSpawnResult::Completed(
+++                            ExecutionResult::new(u8::try_from(exit_code).unwrap_or(if exit_code == 0 { 0 } else { 1 })),
+++                        )))
+++                    }
+++                    Err(e) => {
+++                        let mut stderr = self.params.stderr(&self.shell);
+++                        let _ = writeln!(stderr, "{}: {e}", self.command_name);
+++                        Some(Ok(ExecutionSpawnResult::Completed(
+++                            ExecutionResult::new(1),
+++                        )))
+++                    }
+++                }
+++            }
+++            Err(sys::process::SpawnError::NotFound(_)) => {
+++                // Not found in registry, fall through to PATH search
+++                None
+++            }
+++            Err(sys::process::SpawnError::Failed(msg)) => {
+++                Some(Err(ErrorKind::FailedToExecuteCommand(
+++                    self.command_name.clone(),
+++                    std::io::Error::other(msg),
+++                )
+++                .into()))
+++            }
+++        }
+++    }
+++
++     fn execute_via_external(self, path: &Path) -> Result<ExecutionSpawnResult, error::Error> {
++         let mut shell = self.shell;
++ 
++diff --git a/brush-core/src/sys/stubs/process.rs b/brush-core/src/sys/stubs/process.rs
++index ac44aad..a14ae12 100644
++--- a/brush-core/src/sys/stubs/process.rs
+++++ b/brush-core/src/sys/stubs/process.rs
++@@ -1,5 +1,7 @@
++ //! Process management utilities
++ 
+++use std::cell::RefCell;
+++
++ pub(crate) type ProcessId = i32;
++ 
++ /// Provides access to a child process.
++@@ -32,3 +34,79 @@ pub(crate) fn spawn(mut command: std::process::Command) -> std::io::Result<Child
++     let child = command.spawn()?;
++     Ok(Child { inner: child })
++ }
+++
+++// ============================================================================
+++// External command spawn handler for WASI environments
+++// ============================================================================
+++
+++/// Errors from spawning an external command.
+++#[derive(Debug)]
+++pub enum SpawnError {
+++    /// The command was not found in the registry.
+++    NotFound(String),
+++    /// Spawning failed for some other reason.
+++    Failed(String),
+++}
+++
+++impl std::fmt::Display for SpawnError {
+++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+++        match self {
+++            Self::NotFound(cmd) => write!(f, "command not found: {cmd}"),
+++            Self::Failed(msg) => write!(f, "spawn failed: {msg}"),
+++        }
+++    }
+++}
+++
+++/// Trait for a child process spawned via the external handler.
+++///
+++/// Implementations bridge to the host's subprocess spawning mechanism
+++/// (e.g., WIT process interface).
+++pub trait ExternalChild {
+++    /// Write data to the child's stdin.
+++    fn write_stdin(&mut self, data: &[u8]) -> Result<usize, std::io::Error>;
+++    /// Close the child's stdin, signaling EOF.
+++    fn close_stdin(&mut self);
+++    /// Read from the child's stdout.
+++    fn read_stdout(&mut self, buf: &mut [u8]) -> Result<usize, std::io::Error>;
+++    /// Read from the child's stderr.
+++    fn read_stderr(&mut self, buf: &mut [u8]) -> Result<usize, std::io::Error>;
+++    /// Wait for the child to exit and return its exit code.
+++    fn wait(&mut self) -> Result<i32, std::io::Error>;
+++}
+++
+++/// Result type for the spawn handler.
+++pub type SpawnResult = Result<Box<dyn ExternalChild>, SpawnError>;
+++
+++/// Function type for the external command spawn handler.
+++pub type SpawnFn = Box<dyn Fn(&str, &[String], Vec<(String, String)>, &str) -> SpawnResult>;
+++
+++thread_local! {
+++    static SPAWN_HANDLER: RefCell<Option<SpawnFn>> = const { RefCell::new(None) };
+++}
+++
+++/// Set the external command spawn handler.
+++///
+++/// When the shell encounters an unknown command on WASI, it calls this handler
+++/// before returning "command not found".
+++pub fn set_spawn_handler(f: SpawnFn) {
+++    SPAWN_HANDLER.with(|h| {
+++        *h.borrow_mut() = Some(f);
+++    });
+++}
+++
+++/// Try to spawn an external command via the registered handler.
+++///
+++/// Returns `None` if no handler is registered.
+++/// Returns `Some(Ok(child))` if the handler spawned the command.
+++/// Returns `Some(Err(e))` if the handler was registered but failed.
+++pub fn try_spawn(
+++    cmd: &str,
+++    args: &[String],
+++    env: Vec<(String, String)>,
+++    cwd: &str,
+++) -> Option<SpawnResult> {
+++    SPAWN_HANDLER.with(|h| {
+++        let handler = h.borrow();
+++        handler.as_ref().map(|f| f(cmd, args, env, cwd))
+++    })
+++}
+diff --git a/patches/build-gh-wasm.sh b/patches/build-gh-wasm.sh
+new file mode 100755
+index 0000000..bb1c68e
+--- /dev/null
++++ b/patches/build-gh-wasm.sh
+@@ -0,0 +1,50 @@
++#!/usr/bin/env bash
++# Full build pipeline for gh CLI as a WASI component.
++# Run from the scratch/ directory.
++set -euo pipefail
++
++SCRATCH="$(cd "$(dirname "$0")" && pwd)"
++GOROOT="$SCRATCH/go-wasip3"
++GH_DIR="$SCRATCH/gh-cli"
++WT="$SCRATCH/wasm-tools/target/release/wasm-tools"
++WASMTIME="$SCRATCH/wasmtime/target/release/wasmtime"
++WIT_DIR="$GOROOT/src/internal/wasi/wit"
++FAKE_ETC="$SCRATCH/fake-etc"
++OUT="$SCRATCH/gh-component"
++
++mkdir -p "$OUT" "$FAKE_ETC"
++
++echo "=== Step 1: Vendor dependencies ==="
++cd "$GH_DIR"
++GOROOT="$GOROOT" "$GOROOT/bin/go" mod vendor 2>&1 | tail -3
++
++echo "=== Step 2: Patch vendor ==="
++bash "$SCRATCH/patch-gh-vendor.sh"
++
++echo "=== Step 3: Compile to wasm32 ==="
++GOROOT="$GOROOT" GOOS=wasip3 GOARCH=wasm32 \
++    "$GOROOT/bin/go" build -mod=vendor -o "$OUT/gh.wasm" ./cmd/gh
++
++echo "=== Step 4: Componentize ==="
++"$WT" component embed --all-features "$WIT_DIR" --world command \
++    "$OUT/gh.wasm" -o "$OUT/embedded.wasm"
++"$WT" component new "$OUT/embedded.wasm" -o "$OUT/component.wasm"
++rm "$OUT/embedded.wasm"
++
++echo "=== Step 5: Set up fake /etc ==="
++cp /run/systemd/resolve/stub-resolv.conf "$FAKE_ETC/resolv.conf" 2>/dev/null || \
++    cp /etc/resolv.conf "$FAKE_ETC/resolv.conf" 2>/dev/null || true
++cp /etc/hosts "$FAKE_ETC/hosts" 2>/dev/null || true
++
++echo "=== Done ==="
++ls -lh "$OUT/component.wasm"
++
++echo ""
++echo "Run with:"
++echo "  $WASMTIME run \\"
++echo "    -S p3 -W component-model-async -W component-model-async-builtins \\"
++echo "    -W max-wasm-stack=8388608 \\"
++echo "    -S inherit-env -S inherit-network -S tcp -S udp -S allow-ip-name-lookup \\"
++echo "    --dir $FAKE_ETC::/etc --dir / \\"
++echo "    --env SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \\"
++echo "    -- $OUT/component.wasm <args>"
+diff --git a/patches/patch-gh-vendor.sh b/patches/patch-gh-vendor.sh
+new file mode 100755
+index 0000000..9c7ab53
+--- /dev/null
++++ b/patches/patch-gh-vendor.sh
+@@ -0,0 +1,171 @@
++#!/usr/bin/env bash
++# Patches gh CLI's vendored dependencies for wasip3/wasm32 compilation.
++# Run from the gh-cli directory after `go mod vendor`.
++set -euo pipefail
++
++V=vendor
++
++echo "=== Adding wasip3 stub files ==="
++
++# 1. mattn/go-isatty
++cat > "$V/github.com/mattn/go-isatty/isatty_wasip3.go" << 'GO'
++//go:build wasip3
++
++package isatty
++
++func IsTerminal(fd uintptr) bool    { return false }
++func IsCygwinTerminal(fd uintptr) bool { return false }
++GO
++
++# 2. atotto/clipboard
++cat > "$V/github.com/atotto/clipboard/clipboard_wasip3.go" << 'GO'
++//go:build wasip3
++
++package clipboard
++
++import "errors"
++
++var errNotSupported = errors.New("clipboard not supported on wasip3")
++
++func readAll() (string, error) { return "", errNotSupported }
++func writeAll(text string) error { return errNotSupported }
++GO
++
++# 3. muesli/termenv
++cat > "$V/github.com/muesli/termenv/termenv_wasip3.go" << 'GO'
++//go:build wasip3
++
++package termenv
++
++import "io"
++
++func (o Output) ColorProfile() Profile    { return ANSI256 }
++func (o Output) foregroundColor() Color   { return ANSIColor(7) }
++func (o Output) backgroundColor() Color   { return ANSIColor(0) }
++
++func EnableVirtualTerminalProcessing(w io.Writer) (func() error, error) {
++	return func() error { return nil }, nil
++}
++GO
++
++# 4. gdamore/tcell/v2
++cat > "$V/github.com/gdamore/tcell/v2/tscreen_wasip3.go" << 'GO'
++//go:build wasip3
++
++package tcell
++
++import "errors"
++
++func (t *tScreen) initialize() error {
++	return errors.New("terminal not supported on wasip3")
++}
++GO
++
++# 5. google/certificate-transparency-go/x509
++cat > "$V/github.com/google/certificate-transparency-go/x509/root_wasip3.go" << 'GO'
++//go:build wasip3
++
++package x509
++
++var certFiles = []string{}
++
++func loadSystemRoots() (*CertPool, error)                                   { return NewCertPool(), nil }
++func (c *Certificate) systemVerify(opts *VerifyOptions) ([][]*Certificate, error) { return nil, nil }
++GO
++
++# 6. charmbracelet/bubbletea
++cat > "$V/github.com/charmbracelet/bubbletea/tty_wasip3.go" << 'GO'
++//go:build wasip3
++
++package tea
++
++import (
++	"errors"
++	"os"
++)
++
++const suspendSupported = false
++
++func (p *Program) initInput() (err error)    { return nil }
++func openInputTTY() (*os.File, error) { return nil, errors.New("TTY not supported on wasip3") }
++func suspendProcess()                 {}
++GO
++
++cat > "$V/github.com/charmbracelet/bubbletea/signals_wasip3.go" << 'GO'
++//go:build wasip3
++
++package tea
++
++func (p *Program) listenForResize(done chan struct{}) { <-done }
++GO
++
++# 7. in-toto/in-toto-golang
++cat > "$V/github.com/in-toto/in-toto-golang/in_toto/util_wasip3.go" << 'GO'
++//go:build wasip3
++
++package in_toto
++
++func isWritable(path string) error { return nil }
++GO
++
++# 8. AlecAivazis/survey/v2/terminal
++cat > "$V/github.com/AlecAivazis/survey/v2/terminal/runereader_wasip3.go" << 'GO'
++//go:build wasip3
++
++package terminal
++
++import (
++	"bytes"
++	"io"
++)
++
++type runeReaderState struct{}
++
++func newRuneReaderState(input FileReader) runeReaderState { return runeReaderState{} }
++
++func (rr *RuneReader) Buffer() *bytes.Buffer { return &bytes.Buffer{} }
++
++func (rr *RuneReader) ReadRune() (rune, int, error) {
++	var buf [1]byte
++	n, err := rr.stdio.In.Read(buf[:])
++	if err != nil { return 0, 0, err }
++	if n == 0 { return 0, 0, io.EOF }
++	return rune(buf[0]), 1, nil
++}
++
++func (rr *RuneReader) SetTermMode() error     { return nil }
++func (rr *RuneReader) RestoreTermMode() error  { return nil }
++GO
++
++# 9. sirupsen/logrus
++cat > "$V/github.com/sirupsen/logrus/terminal_check_wasip3.go" << 'GO'
++//go:build wasip3
++
++package logrus
++
++import "io"
++
++func isTerminal(fd int) bool            { return false }
++func checkIfTerminal(w io.Writer) bool  { return false }
++GO
++
++echo "=== Patching overly-broad build constraints ==="
++
++# survey/v2/terminal/runereader_posix.go: !windows -> !windows && !wasip3
++sed -i '1s|//go:build !windows|//go:build !windows \&\& !wasip3|' \
++    "$V/github.com/AlecAivazis/survey/v2/terminal/runereader_posix.go"
++sed -i 's|// +build !windows$|// +build !windows,!wasip3|' \
++    "$V/github.com/AlecAivazis/survey/v2/terminal/runereader_posix.go"
++
++# logrus/terminal_check_notappengine.go: add !wasip3
++sed -i 's|!appengine,!js,!windows,!nacl,!plan9|!appengine,!js,!windows,!nacl,!plan9,!wasip3|' \
++    "$V/github.com/sirupsen/logrus/terminal_check_notappengine.go"
++
++# in-toto util_unix.go: (linux || darwin || !windows) && !wasip3
++# The go:build line has pipes so we use perl instead of sed
++perl -pi -e 's{^//go:build linux \|\| darwin \|\| !windows$}{//go:build (linux || darwin || !windows) \&\& !wasip3}' \
++    "$V/github.com/in-toto/in-toto-golang/in_toto/util_unix.go"
++sed -i 's|// +build linux darwin !windows|// +build !wasip3|' \
++    "$V/github.com/in-toto/in-toto-golang/in_toto/util_unix.go"
++
++echo "=== Done. Patched $(find $V -name '*wasip3*' | wc -l) stub files ==="

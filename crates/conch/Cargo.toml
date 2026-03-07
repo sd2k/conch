@@ -41,6 +41,7 @@ crate-type = ["lib", "staticlib", "cdylib"]
 
 [dev-dependencies]
 async-trait.workspace = true
+eryx-vfs.workspace = true
 
 [[example]]
 name = "basic"
@@ -80,6 +81,10 @@ required-features = ["embedded-shell"]
 
 [[test]]
 name = "agent_integration"
+required-features = ["embedded-shell"]
+
+[[test]]
+name = "subprocess"
 required-features = ["embedded-shell"]
 
 [lints]

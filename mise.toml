@@ -129,3 +129,98 @@ run = "cargo doc --workspace --no-deps --open"
 [tasks.msrv]
 description = "Check compilation on minimum supported Rust version"
 run = "cargo +1.90 check --workspace"
+
+# =============================================================================
+# Subprocess / WASI component tasks
+# =============================================================================
+
+[tasks.build-test-cmd]
+description = "Build the test 'upper' command component (wasip2)"
+depends = ["wasm-target"]
+sources = ["crates/conch-test-cmd/src/**/*.rs"]
+outputs = ["target/wasm32-wasip2/release/conch-test-cmd.wasm"]
+run = "cargo build -p conch-test-cmd --target wasm32-wasip2 --release"
+
+[tasks.compile-shell-cwasm]
+description = "Pre-compile shell to cwasm for fast startup (~0.2s vs ~2.5s)"
+depends = ["wasm-build"]
+sources = ["target/wasm32-wasip2/release/conch_shell.wasm"]
+outputs = ["target/wasm32-wasip2/release/conch_shell.cwasm"]
+run = """
+scratch/wasmtime/target/release/wasmtime compile \
+    -W epoch-interruption \
+    target/wasm32-wasip2/release/conch_shell.wasm \
+    -o target/wasm32-wasip2/release/conch_shell.cwasm
+"""
+
+[tasks.compile-cwasm]
+description = "Pre-compile a wasm to cwasm for subprocess commands"
+usage = "mise run compile-cwasm -- <input.wasm> [output.cwasm]"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+INPUT="${1:?Usage: mise run compile-cwasm -- <input.wasm> [output.cwasm]}"
+OUTPUT="${2:-${INPUT%.wasm}.cwasm}"
+scratch/wasmtime/target/release/wasmtime compile \
+    -W component-model-async -W component-model-async-builtins \
+    "$INPUT" -o "$OUTPUT"
+echo "Compiled: $OUTPUT ($(du -h "$OUTPUT" | cut -f1))"
+"""
+
+[tasks.setup-commands-dir]
+description = "Set up /tmp/conch-cmds with upper (and gh if available)"
+depends = ["build-test-cmd"]
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+mkdir -p /tmp/conch-cmds
+cp target/wasm32-wasip2/release/conch-test-cmd.wasm /tmp/conch-cmds/upper.wasm
+# Copy gh if available
+for f in scratch/gh-component/gh.cwasm scratch/gh-component/component.wasm; do
+    if [ -f "$f" ]; then
+        cp "$f" /tmp/conch-cmds/gh.${f##*.}
+        break
+    fi
+done
+echo "Commands dir ready:"
+ls -lh /tmp/conch-cmds/
+"""
+
+[tasks.setup-gh-sandbox]
+description = "Set up /tmp/gh-root sandbox (config, certs, DNS) for gh CLI"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+mkdir -p /tmp/gh-root/etc/ssl/certs /tmp/gh-root/etc/ca-certificates/extracted
+# DNS — use real upstream, not systemd stub
+REAL_DNS=$(resolvectl status 2>/dev/null | grep 'DNS Servers:' | grep -v Fallback | head -1 | awk '{print $NF}')
+echo "nameserver ${REAL_DNS:-8.8.8.8}" > /tmp/gh-root/etc/resolv.conf
+cp /etc/hosts /tmp/gh-root/etc/hosts 2>/dev/null || true
+# TLS certs — resolve symlinks (WASI doesn't follow them)
+CERT=$(readlink -f /etc/ssl/certs/ca-certificates.crt 2>/dev/null || echo /etc/ssl/certs/ca-certificates.crt)
+cp "$CERT" /tmp/gh-root/etc/ssl/certs/ca-certificates.crt
+cp "$CERT" /tmp/gh-root/etc/ca-certificates/extracted/tls-ca-bundle.pem
+# gh config
+if [ -d "$HOME/.config/gh" ]; then
+    mkdir -p "/tmp/gh-root${HOME}/.config/gh"
+    cp "$HOME/.config/gh/config.yml" "/tmp/gh-root${HOME}/.config/gh/" 2>/dev/null || true
+    cp "$HOME/.config/gh/hosts.yml" "/tmp/gh-root${HOME}/.config/gh/" 2>/dev/null || true
+fi
+echo "Sandbox root ready:"
+find /tmp/gh-root -type f
+"""
+
+[tasks.test-subprocess]
+description = "Run subprocess integration tests"
+depends = ["wasm-build", "build-test-cmd"]
+run = "cargo test --test subprocess -p conch --features embedded-shell"
+
+[tasks.demo]
+description = "Demo: echo hello | upper"
+depends = ["wasm-build", "build-test-cmd", "compile-shell-cwasm", "setup-commands-dir"]
+run = 'cargo run -p conch-cli -- --commands-dir /tmp/conch-cmds -c "echo hello world | upper"'
+
+[tasks.demo-gh]
+description = "Demo: gh pr list | upper (needs setup-gh-sandbox first)"
+depends = ["wasm-build", "compile-shell-cwasm", "setup-commands-dir", "setup-gh-sandbox"]
+run = 'cargo run -p conch-cli -- --commands-dir /tmp/conch-cmds -c "gh pr list -R cli/cli --limit 3 | upper"'

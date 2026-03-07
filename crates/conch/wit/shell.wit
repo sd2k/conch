@@ -69,6 +69,58 @@ interface shell {
     }
 }
 
+/// Subprocess spawning interface.
+///
+/// The host provides the ability to spawn external commands as separate
+/// WASI components. The shell calls these methods when it encounters
+/// a command that is not a builtin or shell function.
+interface process {
+    /// Errors that can occur during process operations.
+    enum process-error {
+        /// The requested command was not found in the component registry.
+        command-not-found,
+        /// Failed to spawn the child process.
+        spawn-failed,
+        /// An I/O error occurred during communication with the child.
+        io-error,
+    }
+
+    /// A handle to a spawned child process (WASI component).
+    resource child {
+        /// Spawn a new child process.
+        ///
+        /// The host looks up `cmd` in its component registry and
+        /// instantiates it as a separate WASI component.
+        spawn: static func(
+            cmd: string,
+            args: list<string>,
+            env: list<tuple<string, string>>,
+            cwd: string,
+        ) -> result<child, process-error>;
+
+        /// Write data to the child's stdin.
+        ///
+        /// Returns the number of bytes written.
+        write-stdin: func(data: list<u8>) -> result<u64, process-error>;
+
+        /// Close the child's stdin, signaling EOF.
+        close-stdin: func();
+
+        /// Read up to `max-bytes` from the child's stdout.
+        ///
+        /// Returns an empty list when there is no more data.
+        read-stdout: func(max-bytes: u32) -> result<list<u8>, process-error>;
+
+        /// Read up to `max-bytes` from the child's stderr.
+        ///
+        /// Returns an empty list when there is no more data.
+        read-stderr: func(max-bytes: u32) -> result<list<u8>, process-error>;
+
+        /// Wait for the child to exit and return its exit code.
+        wait: func() -> result<s32, process-error>;
+    }
+}
+
 /// The conch shell sandbox world.
 ///
 /// This defines the interface between the host (Rust) and the guest (shell WASM).
@@ -80,6 +132,9 @@ interface shell {
 world shell-sandbox {
     /// Import: Host provides tool execution capability.
     import tools;
+
+    /// Import: Host provides subprocess spawning capability.
+    import process;
 
     /// Export: The shell interface with persistent instance resource.
     export shell;

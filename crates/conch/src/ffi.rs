@@ -21,7 +21,7 @@ use std::ffi::{CStr, CString, c_char};
 use std::ptr;
 use std::sync::Arc;
 
-use eryx_vfs::{DirPerms, FilePerms, HybridVfsCtx, InMemoryStorage};
+use eryx_vfs::{ArcStorage, DirPerms, FilePerms, HybridVfsCtx, InMemoryStorage};
 
 use crate::executor::ComponentShellExecutor;
 use crate::limits::ResourceLimits;
@@ -214,7 +214,7 @@ async fn execute_script_internal(
     limits: &ResourceLimits,
 ) -> Result<crate::runtime::ExecutionResult, crate::runtime::RuntimeError> {
     // Create a minimal VFS context with a /tmp directory
-    let storage = Arc::new(InMemoryStorage::new());
+    let storage = ArcStorage::new(Arc::new(InMemoryStorage::new()));
     let mut hybrid_ctx = HybridVfsCtx::new(storage);
     hybrid_ctx.add_vfs_preopen("/tmp", DirPerms::all(), FilePerms::all());
 

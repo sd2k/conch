@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
-members = ["crates/conch", "crates/conch-cli", "crates/conch-grpc", "crates/conch-mcp", "crates/conch-shell"]
+members = ["crates/conch", "crates/conch-cli", "crates/conch-grpc", "crates/conch-mcp", "crates/conch-shell", "crates/conch-test-cmd"]
+exclude = ["vendor", "scratch"]
 
 [workspace.package]
 version = "0.1.1"
@@ -9,13 +10,13 @@ license = "Apache-2.0"
 rust-version = "1.90"
 
 [workspace.dependencies]
-# Host runtime (wasmtime 41+ for component model)
-wasmtime = { version = "41", features = ["component-model", "async"] }
-wasmtime-wasi = "41"
-wasmtime-wasi-io = "41"
+# Host runtime (wasmtime 44 from local scratch build for wasip3 support)
+wasmtime = { path = "scratch/wasmtime/crates/wasmtime", features = ["component-model", "component-model-async", "stack-switching", "async"] }
+wasmtime-wasi = { path = "scratch/wasmtime/crates/wasi", features = ["p3"] }
+wasmtime-wasi-io = { path = "scratch/wasmtime/crates/wasi-io" }
 
-# VFS for WASI filesystem shadowing (from eryx project, local path for wasmtime 41 compat)
-eryx-vfs = { git = "https://github.com/eryx-org/eryx", rev = "31a564b69c7877f15817b933b7d547e356305109" }
+# VFS for WASI filesystem shadowing (local path for wasmtime 44 compat)
+eryx-vfs = { path = "../eryx/crates/eryx-vfs" }
 
 # Async
 tokio = { version = "1" }
@@ -91,3 +92,17 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+
+# Override brush crates with local vendor copy for subprocess spawning patches.
+# Remove this once changes are upstreamed.
+[patch."https://github.com/sd2k/brush"]
+brush-core = { path = "vendor/brush/brush-core" }
+brush-builtins = { path = "vendor/brush/brush-builtins" }
+brush-parser = { path = "vendor/brush/brush-parser" }
+
+# Override wasmtime crates from crates.io so that eryx-vfs (which depends on
+# wasmtime 41 via crates.io) resolves to our local wasmtime 44 build instead.
+[patch.crates-io]
+wasmtime = { path = "scratch/wasmtime/crates/wasmtime" }
+wasmtime-wasi = { path = "scratch/wasmtime/crates/wasi" }
+wasmtime-wasi-io = { path = "scratch/wasmtime/crates/wasi-io" }
