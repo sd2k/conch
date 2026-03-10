@@ -10,13 +10,14 @@ license = "Apache-2.0"
 rust-version = "1.90"
 
 [workspace.dependencies]
-# Host runtime (wasmtime 44 from local scratch build for wasip3 support)
-wasmtime = { path = "scratch/wasmtime/crates/wasmtime", features = ["component-model", "component-model-async", "stack-switching", "async"] }
-wasmtime-wasi = { path = "scratch/wasmtime/crates/wasi", features = ["p3"] }
-wasmtime-wasi-io = { path = "scratch/wasmtime/crates/wasi-io" }
+# Host runtime (wasmtime 44 for wasip3 component-model-async support)
+# Using git dep pinned to a specific commit until wasmtime 44 is published to crates.io.
+wasmtime = { git = "https://github.com/bytecodealliance/wasmtime", rev = "039ae2a", features = ["component-model", "component-model-async", "stack-switching", "async"] }
+wasmtime-wasi = { git = "https://github.com/bytecodealliance/wasmtime", rev = "039ae2a", features = ["p3"] }
+wasmtime-wasi-io = { git = "https://github.com/bytecodealliance/wasmtime", rev = "039ae2a" }
 
-# VFS for WASI filesystem shadowing (local path for wasmtime 44 compat)
-eryx-vfs = { path = "../eryx/crates/eryx-vfs" }
+# VFS for WASI filesystem shadowing (wasmtime 44 branch)
+eryx-vfs = { git = "https://github.com/eryx-org/eryx", branch = "feat/wasmtime-44" }
 
 # Async
 tokio = { version = "1" }
@@ -93,10 +94,9 @@ codegen-units = 1
 panic = "abort"
 strip = true
 
-
 # Override wasmtime crates from crates.io so that eryx-vfs (which depends on
-# wasmtime 41 via crates.io) resolves to our local wasmtime 44 build instead.
+# wasmtime via crates.io) resolves to our git wasmtime instead.
 [patch.crates-io]
-wasmtime = { path = "scratch/wasmtime/crates/wasmtime" }
-wasmtime-wasi = { path = "scratch/wasmtime/crates/wasi" }
-wasmtime-wasi-io = { path = "scratch/wasmtime/crates/wasi-io" }
+wasmtime = { git = "https://github.com/bytecodealliance/wasmtime", rev = "039ae2a" }
+wasmtime-wasi = { git = "https://github.com/bytecodealliance/wasmtime", rev = "039ae2a" }
+wasmtime-wasi-io = { git = "https://github.com/bytecodealliance/wasmtime", rev = "039ae2a" }
