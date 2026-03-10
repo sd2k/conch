@@ -34,8 +34,7 @@ jco transpile \
 jco types \
   --name conch-shell \
   --out-dir conch-shell \
-  --world shell-sandbox-lite \
-  ../crates/conch-shell/wit/shell.wit
+  shell-lite.wit
 """
 
 [tasks.patch-js]
