@@ -12,7 +12,7 @@ sources = ["../crates/conch-shell/src/**/*.rs", "../crates/conch-shell/Cargo.tom
 outputs = ["../target/wasm32-wasip2/release-wasm/conch_shell.wasm"]
 run = """
 rustup target add wasm32-wasip2
-cargo build -p conch-shell --target wasm32-wasip2 --profile release-wasm
+cargo build -p conch-shell --target wasm32-wasip2 --profile release-wasm --no-default-features
 """
 
 [tasks.transpile]
@@ -27,13 +27,11 @@ jco transpile \
   --optimize \
   --out-dir conch-shell \
   --map 'conch:shell/tools=./tool-handler.js' \
-  --map 'conch:shell/process=./process.js' \
   --map wasi:cli/*=./shims/cli.js#* \
   --map wasi:clocks/*=./shims/clocks.js#* \
   --map wasi:filesystem/*=./shims/filesystem.js#* \
   --map wasi:io/*=./shims/io.js#* \
-  --map wasi:random/*=./shims/random.js#* \
-  -- --all-features
+  --map wasi:random/*=./shims/random.js#*
 jco types \
   --name conch-shell \
   --out-dir conch-shell \
