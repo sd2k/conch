@@ -93,12 +93,6 @@ codegen-units = 1
 panic = "abort"
 strip = true
 
-# Override brush crates with local vendor copy for subprocess spawning patches.
-# Remove this once changes are upstreamed.
-[patch."https://github.com/sd2k/brush"]
-brush-core = { path = "vendor/brush/brush-core" }
-brush-builtins = { path = "vendor/brush/brush-builtins" }
-brush-parser = { path = "vendor/brush/brush-parser" }
 
 # Override wasmtime crates from crates.io so that eryx-vfs (which depends on
 # wasmtime 41 via crates.io) resolves to our local wasmtime 44 build instead.
