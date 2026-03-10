@@ -2,7 +2,7 @@
 
 use std::io::Write;
 
-use brush_core::{builtins, error, ExecutionContext, ExecutionResult, ShellExtensions};
+use brush_core::{ExecutionContext, ExecutionResult, ShellExtensions, builtins, error};
 
 pub struct MvCommand;
 
@@ -15,9 +15,7 @@ impl builtins::SimpleCommand for MvCommand {
         match content_type {
             builtins::ContentType::DetailedHelp => Ok("Move (rename) files.".into()),
             builtins::ContentType::ShortUsage => Ok("mv source dest".into()),
-            builtins::ContentType::ShortDescription => {
-                Ok("mv - move (rename) files".into())
-            }
+            builtins::ContentType::ShortDescription => Ok("mv - move (rename) files".into()),
             builtins::ContentType::ManPage => error::unimp("man page not yet implemented"),
         }
     }
@@ -65,11 +63,7 @@ impl builtins::SimpleCommand for MvCommand {
 
         // If multiple sources, dest must be a directory
         if paths.len() > 1 && !dest_path.is_dir() {
-            writeln!(
-                context.stderr(),
-                "mv: target '{}' is not a directory",
-                dest
-            )?;
+            writeln!(context.stderr(), "mv: target '{}' is not a directory", dest)?;
             return Ok(ExecutionResult::new(1));
         }
 
@@ -114,7 +108,8 @@ impl builtins::SimpleCommand for MvCommand {
                                 writeln!(
                                     context.stderr(),
                                     "mv: cannot remove '{}': {}",
-                                    source, e2
+                                    source,
+                                    e2
                                 )?;
                                 exit_code = 1;
                             }
@@ -132,19 +127,13 @@ impl builtins::SimpleCommand for MvCommand {
     }
 }
 
-fn copy_and_remove_dir(
-    src: &std::path::Path,
-    dst: &std::path::Path,
-) -> std::io::Result<()> {
+fn copy_and_remove_dir(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
     copy_dir_all(src, dst)?;
     std::fs::remove_dir_all(src)?;
     Ok(())
 }
 
-fn copy_dir_all(
-    src: &std::path::Path,
-    dst: &std::path::Path,
-) -> std::io::Result<()> {
+fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;

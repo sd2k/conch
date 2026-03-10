@@ -135,7 +135,12 @@ fn load_commands_from_dir(dir: &std::path::Path) -> Result<ComponentRegistry, St
     let mut paths: Vec<_> = entries
         .filter_map(|e| e.ok())
         .map(|e| e.path())
-        .filter(|p| matches!(p.extension().and_then(|e| e.to_str()), Some("wasm" | "cwasm")))
+        .filter(|p| {
+            matches!(
+                p.extension().and_then(|e| e.to_str()),
+                Some("wasm" | "cwasm")
+            )
+        })
         .collect();
     paths.sort();
 

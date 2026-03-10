@@ -2,7 +2,7 @@
 
 use std::io::Write;
 
-use brush_core::{builtins, error, ExecutionContext, ExecutionResult, ShellExtensions};
+use brush_core::{ExecutionContext, ExecutionResult, ShellExtensions, builtins, error};
 
 pub struct MkdirCommand;
 
@@ -17,9 +17,7 @@ impl builtins::SimpleCommand for MkdirCommand {
                 Ok("Create directories if they do not already exist.".into())
             }
             builtins::ContentType::ShortUsage => Ok("mkdir [-p] directory...".into()),
-            builtins::ContentType::ShortDescription => {
-                Ok("mkdir - create directories".into())
-            }
+            builtins::ContentType::ShortDescription => Ok("mkdir - create directories".into()),
             builtins::ContentType::ManPage => error::unimp("man page not yet implemented"),
         }
     }
@@ -85,7 +83,8 @@ impl builtins::SimpleCommand for MkdirCommand {
                 writeln!(
                     context.stderr(),
                     "mkdir: cannot create directory '{}': {}",
-                    dir, e
+                    dir,
+                    e
                 )?;
                 exit_code = 1;
             }

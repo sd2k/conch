@@ -3,7 +3,7 @@
 use std::io::Write;
 use std::path::Path;
 
-use brush_core::{builtins, error, ExecutionContext, ExecutionResult, ShellExtensions};
+use brush_core::{ExecutionContext, ExecutionResult, ShellExtensions, builtins, error};
 
 /// Recursively remove a directory and all its contents.
 /// This is implemented manually because std::fs::remove_dir_all doesn't work
@@ -121,7 +121,9 @@ impl builtins::SimpleCommand for RmCommand {
                 std::fs::remove_file(path)
             };
 
-            if let Err(e) = result && !force {
+            if let Err(e) = result
+                && !force
+            {
                 writeln!(context.stderr(), "rm: cannot remove '{}': {}", file, e)?;
                 exit_code = 1;
             }

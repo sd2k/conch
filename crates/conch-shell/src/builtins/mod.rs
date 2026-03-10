@@ -45,11 +45,17 @@ pub fn register_builtins<SE: ShellExtensions>(
     builtins.insert("head".into(), builtins::simple_builtin::<HeadCommand, SE>());
     builtins.insert("jq".into(), builtins::simple_builtin::<JqCommand, SE>());
     builtins.insert("ls".into(), builtins::simple_builtin::<LsCommand, SE>());
-    builtins.insert("mkdir".into(), builtins::simple_builtin::<MkdirCommand, SE>());
+    builtins.insert(
+        "mkdir".into(),
+        builtins::simple_builtin::<MkdirCommand, SE>(),
+    );
     builtins.insert("mv".into(), builtins::simple_builtin::<MvCommand, SE>());
     builtins.insert("rm".into(), builtins::simple_builtin::<RmCommand, SE>());
     builtins.insert("tail".into(), builtins::simple_builtin::<TailCommand, SE>());
     builtins.insert("tool".into(), builtins::simple_builtin::<ToolCommand, SE>());
-    builtins.insert("touch".into(), builtins::simple_builtin::<TouchCommand, SE>());
+    builtins.insert(
+        "touch".into(),
+        builtins::simple_builtin::<TouchCommand, SE>(),
+    );
     builtins.insert("wc".into(), builtins::simple_builtin::<WcCommand, SE>());
 }

@@ -2,7 +2,7 @@
 
 use std::io::Write;
 
-use brush_core::{builtins, error, ExecutionContext, ExecutionResult, ShellExtensions};
+use brush_core::{ExecutionContext, ExecutionResult, ShellExtensions, builtins, error};
 
 pub struct LsCommand;
 
@@ -15,9 +15,7 @@ impl builtins::SimpleCommand for LsCommand {
         match content_type {
             builtins::ContentType::DetailedHelp => Ok("List directory contents.".into()),
             builtins::ContentType::ShortUsage => Ok("ls [-la] [file...]".into()),
-            builtins::ContentType::ShortDescription => {
-                Ok("ls - list directory contents".into())
-            }
+            builtins::ContentType::ShortDescription => Ok("ls - list directory contents".into()),
             builtins::ContentType::ManPage => error::unimp("man page not yet implemented"),
         }
     }
@@ -97,7 +95,12 @@ impl builtins::SimpleCommand for LsCommand {
             let entries = match std::fs::read_dir(path) {
                 Ok(entries) => entries,
                 Err(e) => {
-                    writeln!(context.stderr(), "ls: cannot open directory '{}': {}", path_str, e)?;
+                    writeln!(
+                        context.stderr(),
+                        "ls: cannot open directory '{}': {}",
+                        path_str,
+                        e
+                    )?;
                     exit_code = 1;
                     continue;
                 }
@@ -158,15 +161,25 @@ fn print_long_entry<SE: ShellExtensions>(
     };
 
     // Simplified permissions (WASM VFS doesn't have real permissions)
-    let perms = if metadata.is_dir() { "rwxr-xr-x" } else { "rw-r--r--" };
+    let perms = if metadata.is_dir() {
+        "rwxr-xr-x"
+    } else {
+        "rw-r--r--"
+    };
 
     let size = metadata.len();
-    let name = path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default();
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy())
+        .unwrap_or_default();
 
     writeln!(
         context.stdout(),
         "{}{} 1 user user {:>8} Jan  1 00:00 {}",
-        file_type, perms, size, name
+        file_type,
+        perms,
+        size,
+        name
     )?;
 
     Ok(())

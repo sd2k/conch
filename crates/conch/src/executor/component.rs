@@ -242,17 +242,11 @@ impl<S: VfsStorage + Clone + 'static> wit::shell::process::HostChild for HybridC
             RegistryEntry::CWasm(bytes) => child::ComponentBytes::Cwasm(bytes),
         };
 
-        let child_process = child::spawn_child(
-            component_bytes,
-            &cmd,
-            &args,
-            &env,
-            &cwd,
-        )
-        .map_err(|e| {
-            eprintln!("[conch] spawn_child({cmd}) failed: {e}");
-            ProcessError::SpawnFailed
-        })?;
+        let child_process =
+            child::spawn_child(component_bytes, &cmd, &args, &env, &cwd).map_err(|e| {
+                eprintln!("[conch] spawn_child({cmd}) failed: {e}");
+                ProcessError::SpawnFailed
+            })?;
 
         let id = self.next_child_id;
         self.next_child_id += 1;
