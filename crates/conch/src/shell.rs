@@ -450,12 +450,7 @@ impl ShellBuilder {
         // Create the persistent shell instance
         let instance = if let Some(registry) = self.component_registry {
             executor
-                .create_instance_with_registry(
-                    &limits,
-                    hybrid_ctx,
-                    self.tool_handler,
-                    registry,
-                )
+                .create_instance_with_registry(&limits, hybrid_ctx, self.tool_handler, registry)
                 .await?
         } else {
             executor

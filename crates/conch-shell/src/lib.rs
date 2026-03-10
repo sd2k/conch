@@ -109,13 +109,15 @@ impl exports::conch::shell::shell::GuestInstance for ShellInstance {
             let env_tuples: Vec<(String, String)> = env;
 
             match Child::spawn(cmd, &args_owned, &env_tuples, cwd) {
-                Ok(child) => Ok(Box::new(WitChildWrapper { child: RefCell::new(child) })),
-                Err(ProcessError::CommandNotFound) => {
-                    Err(brush_core::sys::process::SpawnError::NotFound(cmd.to_string()))
-                }
-                Err(e) => {
-                    Err(brush_core::sys::process::SpawnError::Failed(format!("{e:?}")))
-                }
+                Ok(child) => Ok(Box::new(WitChildWrapper {
+                    child: RefCell::new(child),
+                })),
+                Err(ProcessError::CommandNotFound) => Err(
+                    brush_core::sys::process::SpawnError::NotFound(cmd.to_string()),
+                ),
+                Err(e) => Err(brush_core::sys::process::SpawnError::Failed(format!(
+                    "{e:?}"
+                ))),
             }
         }));
 
@@ -232,7 +234,9 @@ impl brush_core::sys::process::ExternalChild for WitChildWrapper {
 
     fn wait(&mut self) -> Result<i32, std::io::Error> {
         let child = self.child.borrow();
-        child.wait().map_err(|_| std::io::Error::other("wait failed"))
+        child
+            .wait()
+            .map_err(|_| std::io::Error::other("wait failed"))
     }
 }
 

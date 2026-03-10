@@ -2,7 +2,7 @@
 
 use std::io::Write;
 
-use brush_core::{builtins, error, ExecutionContext, ExecutionResult, ShellExtensions};
+use brush_core::{ExecutionContext, ExecutionResult, ShellExtensions, builtins, error};
 
 pub struct TouchCommand;
 
@@ -13,14 +13,12 @@ impl builtins::SimpleCommand for TouchCommand {
         _options: &builtins::ContentOptions,
     ) -> Result<String, brush_core::Error> {
         match content_type {
-            builtins::ContentType::DetailedHelp => {
-                Ok("Update file access and modification times, creating files if they don't exist."
-                    .into())
-            }
+            builtins::ContentType::DetailedHelp => Ok(
+                "Update file access and modification times, creating files if they don't exist."
+                    .into(),
+            ),
             builtins::ContentType::ShortUsage => Ok("touch [-c] file...".into()),
-            builtins::ContentType::ShortDescription => {
-                Ok("touch - change file timestamps".into())
-            }
+            builtins::ContentType::ShortDescription => Ok("touch - change file timestamps".into()),
             builtins::ContentType::ManPage => error::unimp("man page not yet implemented"),
         }
     }
