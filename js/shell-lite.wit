@@ -1,0 +1,33 @@
+// Lite WIT for jco types generation (browser/Node.js, no subprocess spawning).
+// This is a subset of crates/conch-shell/wit/shell.wit with only the lite world.
+package conch:shell@0.2.0;
+
+interface tools {
+    record tool-request {
+        tool: string,
+        params: string,
+        stdin: option<list<u8>>,
+    }
+
+    record tool-result {
+        success: bool,
+        output: string,
+    }
+
+    invoke-tool: func(request: tool-request) -> tool-result;
+}
+
+interface shell {
+    resource instance {
+        constructor();
+        execute: func(script: string) -> result<s32, string>;
+        get-var: func(name: string) -> option<string>;
+        set-var: func(name: string, value: string);
+        last-exit-code: func() -> s32;
+    }
+}
+
+world shell-sandbox-lite {
+    import tools;
+    export shell;
+}
