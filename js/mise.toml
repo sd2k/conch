@@ -27,6 +27,7 @@ jco transpile \
   --optimize \
   --out-dir conch-shell \
   --map 'conch:shell/tools=./tool-handler.js' \
+  --map 'conch:shell/process=./process.js' \
   --map wasi:cli/*=./shims/cli.js#* \
   --map wasi:clocks/*=./shims/clocks.js#* \
   --map wasi:filesystem/*=./shims/filesystem.js#* \
