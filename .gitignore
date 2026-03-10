@@ -36,3 +36,6 @@
 # Pre-compiled WASM artifacts
 *.cwasm
 scratch/
+
+# Local vendor copies (brush fork now uses git dependency)
+vendor/

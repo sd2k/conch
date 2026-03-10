@@ -259,7 +259,7 @@ async fn run_child_component(
     component: &Component,
     stdin_data: &[u8],
     args: &[String],
-    env: &[(String, String)],
+    _env: &[(String, String)],
     _cwd: &str,
 ) -> Result<ChildResult, String> {
     let stdout_pipe = MemoryOutputPipe::new(1024 * 1024); // 1MB

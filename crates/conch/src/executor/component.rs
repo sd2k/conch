@@ -44,8 +44,11 @@ wasmtime::component::bindgen!({
     exports: { default: async },
 });
 
-// Re-export the generated types for public use
-pub use conch::shell::tools::{ToolRequest, ToolResult};
+// Alias the bindgen-generated module to avoid ambiguity with the crate name in doctests.
+use self::conch as wit;
+
+// Re-export the generated types for public use.
+pub use wit::shell::tools::{ToolRequest, ToolResult};
 
 /// Handler for tool invocations from shell scripts.
 ///
@@ -195,7 +198,7 @@ impl<S: VfsStorage + Clone + 'static> HybridComponentState<S> {
 }
 
 #[cfg(feature = "embedded-shell")]
-impl<S: VfsStorage + Clone + 'static> conch::shell::tools::Host for HybridComponentState<S> {
+impl<S: VfsStorage + Clone + 'static> wit::shell::tools::Host for HybridComponentState<S> {
     fn invoke_tool(&mut self, request: ToolRequest) -> ToolResult {
         // For synchronous trait, we need to block on the async handler.
         // We use futures::executor::block_on instead of tokio's block_on
@@ -210,10 +213,10 @@ impl<S: VfsStorage + Clone + 'static> conch::shell::tools::Host for HybridCompon
 }
 
 #[cfg(feature = "embedded-shell")]
-impl<S: VfsStorage + Clone + 'static> conch::shell::process::Host for HybridComponentState<S> {}
+impl<S: VfsStorage + Clone + 'static> wit::shell::process::Host for HybridComponentState<S> {}
 
 #[cfg(feature = "embedded-shell")]
-impl<S: VfsStorage + Clone + 'static> conch::shell::process::HostChild for HybridComponentState<S> {
+impl<S: VfsStorage + Clone + 'static> wit::shell::process::HostChild for HybridComponentState<S> {
     fn spawn(
         &mut self,
         cmd: String,
@@ -221,10 +224,10 @@ impl<S: VfsStorage + Clone + 'static> conch::shell::process::HostChild for Hybri
         env: Vec<(String, String)>,
         cwd: String,
     ) -> Result<
-        wasmtime::component::Resource<conch::shell::process::Child>,
-        conch::shell::process::ProcessError,
+        wasmtime::component::Resource<wit::shell::process::Child>,
+        wit::shell::process::ProcessError,
     > {
-        use conch::shell::process::ProcessError;
+        use self::wit::shell::process::ProcessError;
 
         let registry = self
             .component_registry
@@ -240,7 +243,7 @@ impl<S: VfsStorage + Clone + 'static> conch::shell::process::HostChild for Hybri
         };
 
         let child_process = child::spawn_child(
-            child::ComponentBytes::from(component_bytes),
+            component_bytes,
             &cmd,
             &args,
             &env,
@@ -260,10 +263,10 @@ impl<S: VfsStorage + Clone + 'static> conch::shell::process::HostChild for Hybri
 
     fn write_stdin(
         &mut self,
-        self_: wasmtime::component::Resource<conch::shell::process::Child>,
+        self_: wasmtime::component::Resource<wit::shell::process::Child>,
         data: Vec<u8>,
-    ) -> Result<u64, conch::shell::process::ProcessError> {
-        use conch::shell::process::ProcessError;
+    ) -> Result<u64, wit::shell::process::ProcessError> {
+        use self::wit::shell::process::ProcessError;
 
         let child = self
             .children
@@ -273,7 +276,7 @@ impl<S: VfsStorage + Clone + 'static> conch::shell::process::HostChild for Hybri
         child.write_stdin(data).map_err(|_| ProcessError::IoError)
     }
 
-    fn close_stdin(&mut self, self_: wasmtime::component::Resource<conch::shell::process::Child>) {
+    fn close_stdin(&mut self, self_: wasmtime::component::Resource<wit::shell::process::Child>) {
         if let Some(child) = self.children.get_mut(&self_.rep()) {
             child.close_stdin();
         }
@@ -281,10 +284,10 @@ impl<S: VfsStorage + Clone + 'static> conch::shell::process::HostChild for Hybri
 
     fn read_stdout(
         &mut self,
-        self_: wasmtime::component::Resource<conch::shell::process::Child>,
+        self_: wasmtime::component::Resource<wit::shell::process::Child>,
         _max_bytes: u32,
-    ) -> Result<Vec<u8>, conch::shell::process::ProcessError> {
-        use conch::shell::process::ProcessError;
+    ) -> Result<Vec<u8>, wit::shell::process::ProcessError> {
+        use self::wit::shell::process::ProcessError;
 
         let child = self
             .children
@@ -296,10 +299,10 @@ impl<S: VfsStorage + Clone + 'static> conch::shell::process::HostChild for Hybri
 
     fn read_stderr(
         &mut self,
-        self_: wasmtime::component::Resource<conch::shell::process::Child>,
+        self_: wasmtime::component::Resource<wit::shell::process::Child>,
         _max_bytes: u32,
-    ) -> Result<Vec<u8>, conch::shell::process::ProcessError> {
-        use conch::shell::process::ProcessError;
+    ) -> Result<Vec<u8>, wit::shell::process::ProcessError> {
+        use self::wit::shell::process::ProcessError;
 
         let child = self
             .children
@@ -311,9 +314,9 @@ impl<S: VfsStorage + Clone + 'static> conch::shell::process::HostChild for Hybri
 
     fn wait(
         &mut self,
-        self_: wasmtime::component::Resource<conch::shell::process::Child>,
-    ) -> Result<i32, conch::shell::process::ProcessError> {
-        use conch::shell::process::ProcessError;
+        self_: wasmtime::component::Resource<wit::shell::process::Child>,
+    ) -> Result<i32, wit::shell::process::ProcessError> {
+        use self::wit::shell::process::ProcessError;
 
         let child = self
             .children
@@ -328,7 +331,7 @@ impl<S: VfsStorage + Clone + 'static> conch::shell::process::HostChild for Hybri
 
     fn drop(
         &mut self,
-        self_: wasmtime::component::Resource<conch::shell::process::Child>,
+        self_: wasmtime::component::Resource<wit::shell::process::Child>,
     ) -> wasmtime::Result<()> {
         self.children.remove(&self_.rep());
         Ok(())
@@ -420,10 +423,10 @@ impl ComponentShellExecutor {
             env!("CARGO_MANIFEST_DIR"),
             "/../../target/wasm32-wasip2/release/conch_shell.cwasm"
         );
-        if let Ok(cwasm_bytes) = std::fs::read(cwasm_path) {
-            if let Ok(executor) = (unsafe { Self::from_cwasm(&cwasm_bytes) }) {
-                return Ok(executor);
-            }
+        if let Ok(cwasm_bytes) = std::fs::read(cwasm_path)
+            && let Ok(executor) = unsafe { Self::from_cwasm(&cwasm_bytes) }
+        {
+            return Ok(executor);
         }
         Self::from_bytes(EMBEDDED_COMPONENT)
     }

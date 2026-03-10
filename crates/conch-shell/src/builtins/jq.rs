@@ -183,7 +183,7 @@ fn output_value<SE: ShellExtensions>(
 ) -> Result<(), brush_core::Error> {
     // Check for raw string output
     if opts.raw_output
-        && let Val::Str(s, _) = val
+        && let Val::BStr(s) = val
     {
         writeln!(context.stdout(), "{}", String::from_utf8_lossy(s.as_ref()))?;
         return Ok(());
