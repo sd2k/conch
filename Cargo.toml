@@ -7,7 +7,7 @@ exclude = ["vendor", "scratch"]
 version = "0.1.1"
 edition = "2024"
 license = "Apache-2.0"
-rust-version = "1.90"
+rust-version = "1.91"
 
 [workspace.dependencies]
 # Host runtime (wasmtime 44 for wasip3 component-model-async support)
