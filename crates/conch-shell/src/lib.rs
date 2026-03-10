@@ -15,10 +15,18 @@ use brush_core::{ExecutionParameters, Shell, SourceInfo};
 
 mod builtins;
 
-// Generate WIT bindings for the shell-sandbox world.
+// Generate WIT bindings for the appropriate world.
+// The full sandbox includes subprocess spawning; the lite variant does not.
+#[cfg(feature = "subprocess")]
 wit_bindgen::generate!({
     path: "wit/shell.wit",
     world: "shell-sandbox",
+});
+
+#[cfg(not(feature = "subprocess"))]
+wit_bindgen::generate!({
+    path: "wit/shell.wit",
+    world: "shell-sandbox-lite",
 });
 
 // Re-export types for use in builtins - tools interface has the invoke_tool import
@@ -99,9 +107,9 @@ impl exports::conch::shell::shell::GuestInstance for ShellInstance {
         });
 
         // Set up the external command spawn handler to call back to the host
-        // via the WIT process interface. Only on WASI targets where the stubs
-        // process module provides the handler mechanism.
-        #[cfg(target_family = "wasm")]
+        // via the WIT process interface. Only when subprocess feature is enabled
+        // and on WASI targets where the stubs process module provides the handler.
+        #[cfg(all(target_family = "wasm", feature = "subprocess"))]
         brush_core::sys::process::set_spawn_handler(Box::new(|cmd, args, env, cwd| {
             use conch::shell::process::{Child, ProcessError};
 
@@ -188,12 +196,12 @@ impl exports::conch::shell::shell::GuestInstance for ShellInstance {
 ///
 /// Each method delegates to the corresponding WIT resource method, which calls
 /// back to the host via the component model.
-#[cfg(target_family = "wasm")]
+#[cfg(all(target_family = "wasm", feature = "subprocess"))]
 struct WitChildWrapper {
     child: RefCell<conch::shell::process::Child>,
 }
 
-#[cfg(target_family = "wasm")]
+#[cfg(all(target_family = "wasm", feature = "subprocess"))]
 impl brush_core::sys::process::ExternalChild for WitChildWrapper {
     fn write_stdin(&mut self, data: &[u8]) -> Result<usize, std::io::Error> {
         let child = self.child.borrow();

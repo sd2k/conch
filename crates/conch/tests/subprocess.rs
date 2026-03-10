@@ -69,7 +69,6 @@ async fn test_child_component_with_epoch() {
     }
 
     let mut config = Config::new();
-    config.async_support(true);
     config.epoch_interruption(true); // Match parent engine config
     let engine = Engine::new(&config).unwrap();
 
@@ -150,8 +149,7 @@ async fn test_child_component_direct() {
         }
     }
 
-    let mut config = Config::new();
-    config.async_support(true);
+    let config = Config::new();
     let engine = Engine::new(&config).unwrap();
 
     let wasm_bytes = load_test_cmd_bytes();

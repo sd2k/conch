@@ -139,3 +139,15 @@ world shell-sandbox {
     /// Export: The shell interface with persistent instance resource.
     export shell;
 }
+
+/// Lite variant of the shell sandbox without subprocess spawning.
+///
+/// Used for browser/Node.js environments where subprocess component
+/// spawning is not available (it requires a host runtime like wasmtime).
+world shell-sandbox-lite {
+    /// Import: Host provides tool execution capability.
+    import tools;
+
+    /// Export: The shell interface with persistent instance resource.
+    export shell;
+}

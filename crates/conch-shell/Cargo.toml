@@ -61,5 +61,11 @@ jaq-core = { workspace = true }
 jaq-std = { workspace = true }
 jaq-json = { workspace = true }
 
+[features]
+default = ["subprocess"]
+## Enable subprocess spawning via the `conch:shell/process` WIT interface.
+## Disable for browser/JS builds where subprocess spawning is unavailable.
+subprocess = []
+
 [lints]
 workspace = true

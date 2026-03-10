@@ -52,9 +52,9 @@ tracing = "0.1"
 brush-builtins = { git = "https://github.com/sd2k/brush", branch = "more-wasi-compat", default-features = false }
 brush-core = { git = "https://github.com/sd2k/brush", branch = "more-wasi-compat", default-features = false }
 conch = { path = "crates/conch" }
-jaq-core = "3.0.0-beta"
-jaq-json = "2.0.0-beta"
-jaq-std = "3.0.0-beta"
+jaq-core = "3.0.0-gamma"
+jaq-json = "2.0.0-gamma"
+jaq-std = "3.0.0-gamma"
 wit-bindgen = "0.41"
 rmcp = "0.13"
 tracing-subscriber = "0.3"
