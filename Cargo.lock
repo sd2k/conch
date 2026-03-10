@@ -1509,9 +1509,9 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "hifijson"
-version = "0.5.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "242402749acf71e6f32f5857598b7002c4058a4e3c3b22b4c7d51cab9aea754e"
+checksum = "e31b7adc036c0d7e45ccaf90b90464df98bcf74b706ad5178750d442268ca17e"
 
 [[package]]
 name = "hostname"
@@ -1924,9 +1924,9 @@ dependencies = [
 
 [[package]]
 name = "jaq-core"
-version = "3.0.0-gamma"
+version = "3.0.0-beta"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "644e0fff6b70b3a7673dbff8320734d6e28540404e56140ae1a94d53e3a9ddaa"
+checksum = "9f8be1f6e12cf2b24aa2a30680104403650a5e6aac8e0a9fc1195879366b8919"
 dependencies = [
  "dyn-clone",
  "once_cell",
@@ -1935,9 +1935,9 @@ dependencies = [
 
 [[package]]
 name = "jaq-json"
-version = "2.0.0-gamma"
+version = "2.0.0-beta"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "067d5f2cab4e711d34f59f71f994d350316c39e321a835b6399c4e7da8a3498a"
+checksum = "bfb0e332a04b1d705316161cbb027cb892b02273929b510df46db967b38d7c25"
 dependencies = [
  "bstr",
  "bytes",
@@ -1954,9 +1954,9 @@ dependencies = [
 
 [[package]]
 name = "jaq-std"
-version = "3.0.0-gamma"
+version = "3.0.0-beta"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c0dbe4f87921e3813ec65775c3baa10eb47d479da9db9a93d92af855967a7a88"
+checksum = "da48542201db5084085d28efaaf6732dbc3236a030ac15d71965ba8f647e5995"
 dependencies = [
  "aho-corasick",
  "base64",
