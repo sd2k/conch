@@ -95,6 +95,9 @@ jobs:
 
       - uses: ./.github/actions/setup-rust
 
+      - name: Build test command WASM component
+        run: cargo build -p conch-test-cmd --target wasm32-wasip2 --release
+
       - name: Run tests
         # Exclude conch-grpc tests which have timing issues in CI
         run: cargo nextest run --workspace --all-features --exclude conch-grpc
