@@ -75,12 +75,15 @@ async fn connect_client(addr: SocketAddr) -> SandboxClient<Channel> {
     client
 }
 
+/// Handler function type for tool requests in tests.
+type ToolHandlerFn = Box<dyn Fn(&proto::ToolRequest) -> proto::tool_response::Result + Send>;
+
 /// Helper: run a script and collect stdout, stderr, and exit code.
 /// Optionally handles tool requests via the provided callback.
 async fn run_script(
     client: &mut SandboxClient<Channel>,
     req: ExecuteRequest,
-    tool_handler: Option<Box<dyn Fn(&proto::ToolRequest) -> proto::tool_response::Result + Send>>,
+    tool_handler: Option<ToolHandlerFn>,
 ) -> (String, String, Option<i32>, bool) {
     let (client_tx, client_rx) = mpsc::channel::<ClientMessage>(32);
     let client_stream = ReceiverStream::new(client_rx);
