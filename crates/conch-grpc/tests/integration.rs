@@ -115,9 +115,7 @@ async fn run_script(
                         let result = if let Some(ref handler) = tool_handler {
                             handler(&req)
                         } else {
-                            proto::tool_response::Result::Error(
-                                "no handler configured".to_string(),
-                            )
+                            proto::tool_response::Result::Error("no handler configured".to_string())
                         };
                         client_tx
                             .send(ClientMessage {
@@ -174,7 +172,11 @@ async fn test_simple_echo() {
     let (stdout, _, exit_code, _) = run_script(&mut client, req, None).await;
 
     assert_eq!(exit_code, Some(0));
-    assert!(stdout.contains("hello"), "Expected 'hello' in stdout, got: {}", stdout);
+    assert!(
+        stdout.contains("hello"),
+        "Expected 'hello' in stdout, got: {}",
+        stdout
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
