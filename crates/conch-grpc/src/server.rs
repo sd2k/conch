@@ -10,13 +10,12 @@ use tonic::{Request, Response, Status, Streaming};
 
 use conch::ResourceLimits;
 use conch::agent::{AgentSandbox, ToolDefinition};
-use conch::{ToolHandler, ToolRequest, ToolResult};
+use conch::{ToolHandler, ToolRequest, ToolResult, VfsStorage};
 
 use crate::proto::{
     self, ClientMessage, ExecuteRequest, ServerMessage, client_message::Msg as ClientMsg,
     server_message::Msg as ServerMsg,
 };
-use crate::remote_storage::RemoteStorage;
 
 /// The Sandbox gRPC service implementation.
 #[derive(Clone, Debug)]
@@ -120,10 +119,6 @@ async fn run_execution(
     mut client_stream: Streaming<ClientMessage>,
     server_tx: mpsc::Sender<ServerMessage>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Create the remote storage backed by the gRPC stream
-    let storage = RemoteStorage::new(server_tx.clone());
-    let response_handler = storage.response_handler();
-
     // Convert proto types to conch types
     let limits = convert_limits(&req.limits);
     let tools: Vec<ToolDefinition> = req.tools.iter().map(convert_tool).collect();
@@ -140,11 +135,7 @@ async fn run_execution(
     // Clone server_tx for the message handler task
     let server_tx_for_tools = server_tx.clone();
 
-    // Spawn message handler task
-    // This task:
-    // 1. Handles VFS responses from the client
-    // 2. Forwards tool requests to the client
-    // 3. Routes tool responses back to the waiting handler
+    // Spawn message handler task for tool request/response routing
     let message_handler = tokio::spawn({
         async move {
             // Map of pending tool requests: call_id -> response sender
@@ -161,10 +152,9 @@ async fn run_execution(
                         let _ = server_tx_for_tools
                             .send(ServerMessage {
                                 msg: Some(ServerMsg::ToolRequest(proto::ToolRequest {
-                                    call_id: call_id.clone(),
-                                    tool: request.tool.clone(),
-                                    params_json: request.params.clone(),
-                                    stdin: request.stdin.unwrap_or_default(),
+                                    request_id: call_id.clone(),
+                                    name: request.tool.clone(),
+                                    arguments_json: request.params.clone(),
                                 })),
                             })
                             .await;
@@ -173,21 +163,15 @@ async fn run_execution(
                         pending_tools.insert(call_id, response_tx);
                     }
 
-                    // Handle incoming client messages
+                    // Handle incoming client messages (tool responses only)
                     msg = client_stream.next() => {
                         match msg {
                             Some(Ok(msg)) => {
-                                // Check if it's a VFS response
-                                if response_handler.handle(&msg).await {
-                                    continue;
-                                }
-
-                                // Check if it's a tool response
                                 if let Some(ClientMsg::ToolResponse(resp)) = msg.msg
-                                    && let Some(response_tx) = pending_tools.remove(&resp.call_id)
+                                    && let Some(response_tx) = pending_tools.remove(&resp.request_id)
                                 {
                                     let result = match resp.result {
-                                        Some(proto::tool_response::Result::ResultJson(json)) => {
+                                        Some(proto::tool_response::Result::JsonResult(json)) => {
                                             ToolResult {
                                                 success: true,
                                                 output: json,
@@ -222,20 +206,8 @@ async fn run_execution(
         }
     });
 
-    // Build the agent sandbox with remote storage and tool handler
-    let mut builder = AgentSandbox::builder(&req.agent_id);
-
-    if let Some(ref metadata) = req.metadata {
-        if !metadata.name.is_empty() {
-            builder = builder.name(&metadata.name);
-        }
-        for cap in &metadata.capabilities {
-            builder = builder.capability(cap);
-        }
-        if let Ok(params) = serde_json::from_str(&metadata.params_json) {
-            builder = builder.params(params);
-        }
-    }
+    // Build the agent sandbox with in-memory storage and tool handler
+    let mut builder = AgentSandbox::builder(format!("conch-{}", uuid_v4()));
 
     for tool in tools {
         builder = builder.tool(tool);
@@ -244,14 +216,25 @@ async fn run_execution(
     // Set up the tool handler
     builder = builder.tool_handler(tool_handler);
 
-    // Build with the remote storage - this makes VFS calls!
-    tracing::debug!("Building sandbox for agent {}", req.agent_id);
+    // Build with default in-memory storage
+    tracing::debug!("Building sandbox");
     let mut sandbox = builder
-        .build_with_storage(storage)
+        .build()
         .await
         .map_err(|e| format!("failed to build sandbox: {}", e))?;
 
-    // Execute the script - tool invocations happen via the callback
+    // Write supporting files into /agent/scratch/ (already mounted by AgentSandbox)
+    if !req.files.is_empty() {
+        let vfs: &dyn VfsStorage = sandbox.vfs();
+        for file in &req.files {
+            let path = format!("/agent/scratch/{}", file.name);
+            vfs.write(&path, &file.content)
+                .await
+                .map_err(|e| format!("failed to write supporting file {}: {}", file.name, e))?;
+        }
+    }
+
+    // Execute the script
     tracing::debug!("Executing script");
     let result = sandbox
         .execute(&req.script, &limits)
@@ -262,7 +245,7 @@ async fn run_execution(
     if !result.stdout.is_empty() {
         let _ = server_tx
             .send(ServerMessage {
-                msg: Some(ServerMsg::Output(proto::Output {
+                msg: Some(ServerMsg::Output(proto::OutputEvent {
                     stream: proto::OutputStream::Stdout.into(),
                     data: result.stdout.clone(),
                 })),
@@ -274,7 +257,7 @@ async fn run_execution(
     if !result.stderr.is_empty() {
         let _ = server_tx
             .send(ServerMessage {
-                msg: Some(ServerMsg::Output(proto::Output {
+                msg: Some(ServerMsg::Output(proto::OutputEvent {
                     stream: proto::OutputStream::Stderr.into(),
                     data: result.stderr.clone(),
                 })),
@@ -282,16 +265,19 @@ async fn run_execution(
             .await;
     }
 
-    // Send completion
+    // Send execution result
     let _ = server_tx
         .send(ServerMessage {
-            msg: Some(ServerMsg::Completed(proto::Completed {
+            msg: Some(ServerMsg::Result(proto::ExecuteResult {
                 exit_code: result.exit_code,
-                truncated: result.truncated,
+                stdout: String::from_utf8_lossy(&result.stdout).to_string(),
+                stderr: String::from_utf8_lossy(&result.stderr).to_string(),
+                error: String::new(),
                 stats: Some(proto::ExecutionStats {
                     cpu_time_ms: result.stats.cpu_time_ms,
                     wall_time_ms: result.stats.wall_time_ms,
-                    memory_bytes: result.stats.peak_memory_bytes,
+                    peak_memory_bytes: result.stats.peak_memory_bytes,
+                    fuel_consumed: 0, // TODO: expose from conch
                 }),
             })),
         })
@@ -306,7 +292,11 @@ async fn run_execution(
 fn convert_limits(proto_limits: &Option<proto::ResourceLimits>) -> ResourceLimits {
     match proto_limits {
         Some(l) => ResourceLimits {
-            max_cpu_ms: if l.max_cpu_ms > 0 { l.max_cpu_ms } else { 5000 },
+            max_cpu_ms: if l.execution_timeout_ms > 0 {
+                l.execution_timeout_ms
+            } else {
+                30000
+            },
             max_memory_bytes: if l.max_memory_bytes > 0 {
                 l.max_memory_bytes
             } else {
@@ -317,8 +307,8 @@ fn convert_limits(proto_limits: &Option<proto::ResourceLimits>) -> ResourceLimit
             } else {
                 1024 * 1024
             },
-            timeout: Duration::from_millis(if l.timeout_ms > 0 {
-                l.timeout_ms
+            timeout: Duration::from_millis(if l.execution_timeout_ms > 0 {
+                l.execution_timeout_ms
             } else {
                 30000
             }),
@@ -327,10 +317,20 @@ fn convert_limits(proto_limits: &Option<proto::ResourceLimits>) -> ResourceLimit
     }
 }
 
-fn convert_tool(proto_tool: &proto::ToolDefinition) -> ToolDefinition {
+fn convert_tool(proto_tool: &proto::ToolDeclaration) -> ToolDefinition {
     let schema =
         serde_json::from_str(&proto_tool.parameters_schema_json).unwrap_or(serde_json::json!({}));
     ToolDefinition::new(&proto_tool.name, &proto_tool.description, schema)
+}
+
+/// Generate a simple UUID v4 string (no external dependency needed).
+fn uuid_v4() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("{:032x}", nanos)
 }
 
 /// Server configuration and runner.
@@ -376,7 +376,6 @@ async fn shutdown_signal() {
             }
             Err(e) => {
                 tracing::error!("Failed to install SIGTERM handler: {}", e);
-                // Fall through to let ctrl_c handle shutdown
                 std::future::pending::<()>().await;
             }
         }
