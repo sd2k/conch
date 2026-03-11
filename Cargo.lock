@@ -708,7 +708,6 @@ dependencies = [
  "async-trait",
  "clap",
  "conch",
- "eryx-vfs",
  "prost",
  "serde_json",
  "tempfile",

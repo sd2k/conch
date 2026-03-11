@@ -42,6 +42,12 @@ wasmtime::component::bindgen!({
     // Make exports async so we can call them from async Rust code
     // when the engine has async_support(true) enabled.
     exports: { default: async },
+    // Mark invoke-tool as async so it uses fiber-based async:
+    // the host can await on tokio channels, but from the guest's
+    // perspective the call is blocking. Requires Config::async_support.
+    imports: {
+        "conch:shell/tools.invoke-tool": async,
+    },
 });
 
 // Alias the bindgen-generated module to avoid ambiguity with the crate name in doctests.
@@ -199,15 +205,18 @@ impl<S: VfsStorage + Clone + 'static> HybridComponentState<S> {
 
 #[cfg(feature = "embedded-shell")]
 impl<S: VfsStorage + Clone + 'static> wit::shell::tools::Host for HybridComponentState<S> {
-    fn invoke_tool(&mut self, request: ToolRequest) -> ToolResult {
-        // For synchronous trait, we need to block on the async handler.
-        // We use futures::executor::block_on instead of tokio's block_on
-        // to avoid "cannot start a runtime from within a runtime" panic
-        // since this is called from within WASM execution which is already
-        // running in the tokio runtime.
-        match &self.tool_handler {
-            Some(handler) => futures::executor::block_on(handler.invoke(request)),
-            None => default_tool_handler(&request),
+    fn invoke_tool(
+        &mut self,
+        request: ToolRequest,
+    ) -> impl std::future::Future<Output = ToolResult> + Send {
+        // With async imports, wasmtime uses fiber-based async: this future
+        // is polled on the tokio runtime, so we can freely use tokio channels.
+        let handler = self.tool_handler.clone();
+        async move {
+            match handler {
+                Some(handler) => handler.invoke(request).await,
+                None => default_tool_handler(&request),
+            }
         }
     }
 }
@@ -434,6 +443,9 @@ impl ComponentShellExecutor {
     /// Create an engine with the appropriate configuration.
     fn create_engine() -> Result<Engine, RuntimeError> {
         let mut config = Config::new();
+        // async_support is enabled by default in wasmtime 44+.
+        // Host imports marked `async` in bindgen use fiber-based async:
+        // the host can await on tokio channels, guest sees blocking calls.
         config.epoch_interruption(true);
         Engine::new(&config).map_err(|e| RuntimeError::Wasm(e.to_string()))
     }
