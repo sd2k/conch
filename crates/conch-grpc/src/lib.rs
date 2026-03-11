@@ -1,38 +1,33 @@
 //! Conch gRPC Server
 //!
 //! A gRPC service that exposes Conch sandboxed shell execution with
-//! bidirectional streaming for VFS operations and tool callbacks.
+//! bidirectional streaming for tool callbacks.
 //!
 //! # Architecture
 //!
-//! The server is stateless - all VFS state is owned by the client (e.g., a Go
-//! orchestrator). Every filesystem operation (read, write, list, etc.) is sent
-//! to the client over the gRPC stream, and the client responds with the data
-//! or error.
-//!
-//! This design allows:
-//! - Rust pods to be rolled/scaled freely
-//! - State to persist in the client's storage (DB, Redis, etc.)
-//! - The client to implement caching, access control, etc.
+//! The server uses in-memory VFS storage. Each execution gets a fresh sandbox
+//! with an isolated filesystem. Supporting files can be pre-seeded via the
+//! `SupportingFile` message, and tools are invoked via bidirectional gRPC
+//! streaming.
 //!
 //! # Example Flow
 //!
 //! ```text
 //! Client                                    Server
 //! │                                           │
-//! │  ExecuteRequest{script: "cat /file"}      │
+//! │  ExecuteRequest{script, tools, files}     │
 //! │ ─────────────────────────────────────────>│
 //! │                                           │
-//! │       VfsReadRequest{path: "/file"}       │
+//! │       ToolRequest{name, args_json}        │
 //! │<───────────────────────────────────────── │
 //! │                                           │
-//! │  VfsReadResponse{data: "contents"}        │
+//! │  ToolResponse{json_result}                │
 //! │ ─────────────────────────────────────────>│
 //! │                                           │
-//! │       Output{stdout: "contents"}          │
+//! │       Output{stdout: "..."}               │
 //! │<───────────────────────────────────────── │
 //! │                                           │
-//! │       Completed{exit_code: 0}             │
+//! │       ExecuteResult{exit_code: 0}         │
 //! │<───────────────────────────────────────── │
 //! ```
 
@@ -42,10 +37,8 @@ pub mod proto {
     tonic::include_proto!("conch.v1");
 }
 
-mod remote_storage;
 mod server;
 
-pub use remote_storage::RemoteStorage;
 pub use server::{SandboxServer, SandboxService};
 
 // Re-export proto types for convenience

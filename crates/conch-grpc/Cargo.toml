@@ -12,7 +12,6 @@ path = "src/main.rs"
 
 [dependencies]
 conch = { workspace = true, features = ["embedded-shell"] }
-eryx-vfs.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "signal"] }
 tokio-stream = "0.1"
 tonic = "0.12"
