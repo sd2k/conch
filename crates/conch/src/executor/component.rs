@@ -619,8 +619,14 @@ impl<S: VfsStorage + Clone + 'static> ShellInstance<S> {
         let _ = self.store.data_mut().stdout();
         let _ = self.store.data_mut().stderr();
 
-        // Set up epoch-based timeout
-        self.store.set_epoch_deadline(limits.max_cpu_ms);
+        // Set up epoch-based timeout. Deadline is "trap on the next
+        // increment" — combined with the single increment fired below
+        // after `timeout_ms`, the guest traps as soon as it reaches an
+        // interruption point past the deadline. The previous code set the
+        // deadline to `max_cpu_ms` (interpreted as a tick count) but only
+        // ever fired one increment, so the deadline was never reached and
+        // a CPU-bound guest never tripped the timeout.
+        self.store.set_epoch_deadline(1);
 
         // Increment epoch in background for timeout
         let engine = self.engine.clone();
@@ -637,7 +643,15 @@ impl<S: VfsStorage + Clone + 'static> ShellInstance<S> {
             .call_execute(&mut self.store, self.shell_resource, script)
             .await
             .map_err(|e: wasmtime::Error| {
-                if e.to_string().contains("epoch") {
+                // Epoch-deadline interruption surfaces as a wasmtime::Trap
+                // with the Interrupt variant. The previous string match
+                // (looking for "epoch" in the formatted message) didn't
+                // match what wasmtime actually emits — the formatted error
+                // is just a wasm backtrace, with no "epoch" substring.
+                if matches!(
+                    e.downcast_ref::<wasmtime::Trap>(),
+                    Some(&wasmtime::Trap::Interrupt)
+                ) {
                     RuntimeError::Timeout
                 } else {
                     RuntimeError::Wasm(format!("execute failed: {}", e))
