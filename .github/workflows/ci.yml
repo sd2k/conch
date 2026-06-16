@@ -99,8 +99,11 @@ jobs:
         run: cargo build -p conch-test-cmd --target wasm32-wasip2 --release
 
       - name: Run tests
-        # Exclude conch-grpc tests which have timing issues in CI
-        run: cargo nextest run --workspace --all-features --exclude conch-grpc
+        # Use --profile ci for retries + longer timeouts on slow WASM tests.
+        # This lets the conch-grpc integration tests run in CI again: they
+        # race on server startup/timeouts when run concurrently with the
+        # heavy WASM tests, so retries make them reliable.
+        run: cargo nextest run --workspace --all-features --profile ci
 
   msrv:
     name: MSRV

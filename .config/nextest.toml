@@ -1,0 +1,25 @@
+# See https://nexte.st/docs/configuration/
+
+[profile.default]
+# Print slow tests after the run
+slow-timeout = { period = "30s", terminate-after = 2 }
+
+# Show which tests are being run
+status-level = "all"
+
+# Don't stop on first failure locally
+fail-fast = false
+
+# Number of retries for flaky tests (0 = no retries)
+retries = 0
+
+[profile.ci]
+# CI profile with stricter settings
+fail-fast = true
+# Retry flaky tests (e.g. conch-grpc integration tests, which race on
+# server startup / timeouts when run concurrently with the heavy WASM
+# tests in the rest of the workspace).
+retries = 2
+slow-timeout = { period = "60s", terminate-after = 3 }
+# Increase default timeout for slow WASM component tests
+default-timeout = "120s"
