@@ -108,7 +108,10 @@ async fn run_script(
     let mut exit_code = None;
     let mut tool_called = false;
 
-    let result = timeout(Duration::from_secs(10), async {
+    // Generous timeout: in CI these tests each spin up a full wasmtime shell
+    // and can run slowly under load. Concurrency is bounded by the
+    // `conch-grpc-serial` nextest test-group (see .config/nextest.toml).
+    let result = timeout(Duration::from_secs(60), async {
         while let Some(msg_result) = server_stream.next().await {
             let msg = msg_result.unwrap();
             if let Some(server_msg) = msg.msg {

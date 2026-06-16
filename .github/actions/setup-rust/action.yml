@@ -16,7 +16,10 @@ runs:
 
     - name: Install cargo-nextest
       shell: bash
-      run: cargo binstall --no-confirm --force cargo-nextest
+      # `--disable-strategies compile` forces a prebuilt binary and prevents
+      # binstall from silently falling back to a source build, which fails the
+      # "must use --locked" tripwire in recent cargo-nextest releases.
+      run: cargo binstall --no-confirm --force --disable-strategies compile cargo-nextest
 
     - name: Install mise
       uses: jdx/mise-action@v3
