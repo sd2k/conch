@@ -126,7 +126,7 @@ jobs:
         with:
           mise_toml: |
             [tools]
-            rust = "1.91"
+            rust = "1.92"
 
       - name: Check MSRV
         # Only check conch core without embedded-shell feature
