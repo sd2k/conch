@@ -17,8 +17,8 @@ wasmtime = { version = "44", features = ["component-model", "component-model-asy
 wasmtime-wasi = { version = "44", features = ["p3"] }
 wasmtime-wasi-io = "44"
 
-# VFS for WASI filesystem shadowing (wasmtime 44 branch)
-eryx-vfs = { git = "https://github.com/eryx-org/eryx", branch = "feat/wasmtime-44" }
+# VFS for WASI filesystem shadowing (released crate; tracks wasmtime 44).
+eryx-vfs = "0.5.0"
 
 # Async
 tokio = { version = "1" }
