@@ -50,8 +50,10 @@ libc = "0.2"
 
 # Logging/tracing
 tracing = "0.1"
-brush-builtins = { git = "https://github.com/sd2k/brush", branch = "more-wasi-compat", default-features = false }
-brush-core = { git = "https://github.com/sd2k/brush", branch = "more-wasi-compat", default-features = false }
+# Pinned to an exact rev (not the moving `more-wasi-compat` branch) for
+# reproducibility. See #33 for the plan to upstream these patches and drop the fork.
+brush-builtins = { git = "https://github.com/sd2k/brush", rev = "94f4a936badaa16223cf736418f7b87c153ea960", default-features = false }
+brush-core = { git = "https://github.com/sd2k/brush", rev = "94f4a936badaa16223cf736418f7b87c153ea960", default-features = false }
 conch = { path = "crates/conch" }
 jaq-core = "=3.0.0-beta"
 jaq-json = "=2.0.0-beta"
