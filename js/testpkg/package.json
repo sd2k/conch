@@ -6,7 +6,7 @@
     "@bsull/conch": "../conch-shell",
     "@types/node": "^22.13.0",
     "typescript": "^5.8.0",
-    "vitest": "^3.0.0"
+    "vitest": "^3.2.6"
   },
   "scripts": {
     "test": "vitest",
