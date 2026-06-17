@@ -32,6 +32,9 @@ pub enum RuntimeError {
     /// VFS error
     #[error("VFS error: {0}")]
     Vfs(String),
+    /// Snapshot serialization or restore error
+    #[error("snapshot error: {0}")]
+    Snapshot(String),
 }
 
 /// Statistics about shell execution

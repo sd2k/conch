@@ -49,6 +49,8 @@ use crate::runtime::{ExecutionResult, RuntimeError};
 
 #[cfg(feature = "embedded-shell")]
 use crate::executor::ShellInstance;
+#[cfg(feature = "embedded-shell")]
+use crate::snapshot::Snapshot;
 
 /// A sized wrapper around `Arc<dyn VfsStorage>` that implements `VfsStorage`.
 ///
@@ -422,46 +424,26 @@ impl ShellBuilder {
             None => ComponentShellExecutor::embedded()?,
         };
 
-        // Build HybridVfsCtx - wrap in Arc for HybridVfsCtx which expects Arc<S>
-        let mut hybrid_ctx = HybridVfsCtx::new(vfs.clone());
-
-        // Add VFS mounts
-        for mount in &vfs_mounts {
-            hybrid_ctx.add_vfs_preopen(&mount.guest_path, mount.dir_perms, mount.file_perms);
-        }
-
-        // Add real filesystem mounts
-        for mount in &self.real_mounts {
-            let real_dir =
-                RealDir::open_ambient(&mount.host_path, mount.dir_perms, mount.file_perms)
-                    .map_err(|e| {
-                        RuntimeError::Wasm(format!(
-                            "Failed to open mount {}: {}",
-                            mount.host_path.display(),
-                            e
-                        ))
-                    })?;
-            hybrid_ctx.add_real_preopen(&mount.guest_path, real_dir);
-        }
-
         // Default limits
         let limits = self.limits.unwrap_or_default();
 
-        // Create the persistent shell instance
-        let instance = if let Some(registry) = self.component_registry {
-            executor
-                .create_instance_with_registry(&limits, hybrid_ctx, self.tool_handler, registry)
-                .await?
-        } else {
-            executor
-                .create_instance(&limits, hybrid_ctx, self.tool_handler)
-                .await?
+        // Retain the config so the shell can fork later.
+        let config = ShellConfig {
+            executor,
+            vfs_mounts,
+            real_mounts: self.real_mounts,
+            tool_handler: self.tool_handler,
+            component_registry: self.component_registry,
+            limits: limits.clone(),
         };
+
+        let instance = build_shell_instance(&config, &vfs).await?;
 
         Ok(Shell {
             instance,
             vfs,
             default_limits: limits,
+            config,
         })
     }
 
@@ -502,6 +484,64 @@ pub struct Shell {
     instance: ShellInstance<DynVfsStorage>,
     vfs: DynVfsStorage,
     default_limits: ResourceLimits,
+    /// Build configuration retained so [`Shell::fork`] can spawn faithful copies.
+    config: ShellConfig,
+}
+
+/// Build configuration retained on a [`Shell`] so it can be reconstructed for
+/// forking (a fork needs the same executor, mounts, tool handler, and limits).
+#[cfg(feature = "embedded-shell")]
+#[derive(Clone)]
+struct ShellConfig {
+    executor: ComponentShellExecutor,
+    vfs_mounts: Vec<VfsMount>,
+    real_mounts: Vec<RealMount>,
+    tool_handler: Option<Arc<dyn ToolHandler>>,
+    component_registry: Option<Arc<crate::executor::ComponentRegistry>>,
+    limits: ResourceLimits,
+}
+
+/// Build a fresh shell instance for `vfs` using a retained [`ShellConfig`].
+/// Shared by [`ShellBuilder::build`] and [`Shell::fork`].
+#[cfg(feature = "embedded-shell")]
+async fn build_shell_instance(
+    config: &ShellConfig,
+    vfs: &DynVfsStorage,
+) -> Result<ShellInstance<DynVfsStorage>, RuntimeError> {
+    let mut hybrid_ctx = HybridVfsCtx::new(vfs.clone());
+    for mount in &config.vfs_mounts {
+        hybrid_ctx.add_vfs_preopen(&mount.guest_path, mount.dir_perms, mount.file_perms);
+    }
+    for mount in &config.real_mounts {
+        let real_dir = RealDir::open_ambient(&mount.host_path, mount.dir_perms, mount.file_perms)
+            .map_err(|e| {
+            RuntimeError::Wasm(format!(
+                "Failed to open mount {}: {}",
+                mount.host_path.display(),
+                e
+            ))
+        })?;
+        hybrid_ctx.add_real_preopen(&mount.guest_path, real_dir);
+    }
+    match &config.component_registry {
+        Some(registry) => {
+            config
+                .executor
+                .create_instance_with_registry(
+                    &config.limits,
+                    hybrid_ctx,
+                    config.tool_handler.clone(),
+                    registry.clone(),
+                )
+                .await
+        }
+        None => {
+            config
+                .executor
+                .create_instance(&config.limits, hybrid_ctx, config.tool_handler.clone())
+                .await
+        }
+    }
 }
 
 #[cfg(feature = "embedded-shell")]
@@ -583,6 +623,97 @@ impl Shell {
     pub async fn last_exit_code(&mut self) -> Result<i32, RuntimeError> {
         self.instance.last_exit_code().await
     }
+
+    /// Capture a snapshot of the current shell session.
+    ///
+    /// Captures the interpreter state (variables, functions, aliases, shell
+    /// options, the working directory, traps, the directory stack) and, when the
+    /// shell uses in-memory storage, the VFS contents. Snapshots can only be
+    /// taken between `execute` calls, not while a script is running.
+    ///
+    /// Restore the snapshot into this (or another) shell with [`Self::restore`].
+    pub async fn snapshot(&mut self) -> Result<Snapshot, RuntimeError> {
+        let shell_state = self.instance.snapshot().await?;
+        let vfs = self.snapshot_vfs().await?;
+        Ok(Snapshot::new(shell_state, vfs))
+    }
+
+    /// Restore a previously captured [`Snapshot`].
+    ///
+    /// Replaces the interpreter state with the snapshot's (builtins are
+    /// re-attached automatically) and, if the snapshot captured VFS contents,
+    /// restores the in-memory filesystem in place. Returns an error if the
+    /// snapshot is malformed or its format version is incompatible.
+    pub async fn restore(&mut self, snapshot: &Snapshot) -> Result<(), RuntimeError> {
+        self.instance.restore(&snapshot.shell_state).await?;
+        if let Some(vfs_bytes) = &snapshot.vfs {
+            let vsnap: eryx_vfs::InMemorySnapshot = rmp_serde::from_slice(vfs_bytes)
+                .map_err(|e| RuntimeError::Snapshot(format!("malformed VFS snapshot: {e}")))?;
+            self.in_memory_vfs()
+                .ok_or_else(|| {
+                    RuntimeError::Snapshot(
+                        "snapshot has VFS contents but this shell's storage is not in-memory"
+                            .to_string(),
+                    )
+                })?
+                .restore(&vsnap)
+                .await;
+        }
+        Ok(())
+    }
+
+    /// Fork this shell into an independent copy.
+    ///
+    /// The returned shell starts with a deep copy of this shell's interpreter
+    /// state **and** VFS contents, but is fully isolated: subsequent changes to
+    /// either shell (variables, files, ...) do not affect the other. The fork
+    /// reuses the same executor, mounts, tool handler, and limits.
+    ///
+    /// Requires the shell to use in-memory VFS storage (the default); returns an
+    /// error otherwise.
+    pub async fn fork(&mut self) -> Result<Shell, RuntimeError> {
+        let snapshot = self.snapshot().await?;
+
+        // Build an independent VFS seeded from the snapshot.
+        let vfs_bytes = snapshot.vfs.as_ref().ok_or_else(|| {
+            RuntimeError::Snapshot("fork requires in-memory VFS storage".to_string())
+        })?;
+        let vsnap: eryx_vfs::InMemorySnapshot = rmp_serde::from_slice(vfs_bytes)
+            .map_err(|e| RuntimeError::Snapshot(format!("malformed VFS snapshot: {e}")))?;
+        let forked_vfs = DynVfsStorage::new(InMemoryStorage::from_snapshot(&vsnap));
+
+        // Fresh instance with the same config, then replay the interpreter state.
+        let mut instance = build_shell_instance(&self.config, &forked_vfs).await?;
+        instance.restore(&snapshot.shell_state).await?;
+
+        Ok(Shell {
+            instance,
+            vfs: forked_vfs,
+            default_limits: self.default_limits.clone(),
+            config: self.config.clone(),
+        })
+    }
+
+    /// Serialize the VFS contents if the storage is in-memory.
+    async fn snapshot_vfs(&self) -> Result<Option<Vec<u8>>, RuntimeError> {
+        match self.in_memory_vfs() {
+            Some(storage) => {
+                let vsnap = storage.snapshot().await;
+                let bytes = rmp_serde::to_vec_named(&vsnap)
+                    .map_err(|e| RuntimeError::Snapshot(e.to_string()))?;
+                Ok(Some(bytes))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Downcast the shell's VFS to `InMemoryStorage`, if that's what it is.
+    fn in_memory_vfs(&self) -> Option<&InMemoryStorage> {
+        self.vfs
+            .inner()
+            .as_any()
+            .and_then(|a| a.downcast_ref::<InMemoryStorage>())
+    }
 }
 
 /// Stub Shell type when embedded-shell feature is disabled.
@@ -660,6 +791,159 @@ mod tests {
             "Expected 'hello_world' in stdout: {:?}",
             stdout
         );
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_restore_same_shell() {
+        let mut shell = Shell::builder().build().await.unwrap();
+        let limits = ResourceLimits::default();
+
+        shell.execute("x=42", &limits).await.unwrap();
+        shell
+            .execute(r#"greet() { echo "hi $1 $x"; }"#, &limits)
+            .await
+            .unwrap();
+
+        let snap = shell.snapshot().await.unwrap();
+
+        // Mutate state after the snapshot...
+        shell.execute("x=999", &limits).await.unwrap();
+
+        // ...then restore: x is back to 42 and the function is intact.
+        shell.restore(&snap).await.unwrap();
+        let result = shell.execute("greet world", &limits).await.unwrap();
+        assert_eq!(result.exit_code, 0);
+        let stdout = String::from_utf8_lossy(&result.stdout);
+        assert!(stdout.contains("hi world 42"), "stdout: {stdout:?}");
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_restore_into_fresh_shell() {
+        let limits = ResourceLimits::default();
+
+        // Capture state in shell A, serialize to bytes.
+        let mut a = Shell::builder().build().await.unwrap();
+        a.execute("name=conch", &limits).await.unwrap();
+        a.execute(r#"shout() { echo "${name}!"; }"#, &limits)
+            .await
+            .unwrap();
+        let bytes = a.snapshot().await.unwrap().to_bytes().unwrap();
+
+        // Restore into a brand-new shell B. Running `shout` here also confirms
+        // builtins (echo) are re-attached after restore.
+        let mut b = Shell::builder().build().await.unwrap();
+        let snap = Snapshot::from_bytes(&bytes).unwrap();
+        b.restore(&snap).await.unwrap();
+        let result = b.execute("shout", &limits).await.unwrap();
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(String::from_utf8_lossy(&result.stdout).trim(), "conch!");
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_from_bytes_rejects_garbage() {
+        assert!(Snapshot::from_bytes(b"not a valid snapshot").is_err());
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_restore_includes_vfs() {
+        let mut shell = Shell::builder().build().await.unwrap();
+        let limits = ResourceLimits::default();
+
+        // Create a file in the VFS via the shell.
+        shell
+            .execute("echo original > /scratch/note.txt", &limits)
+            .await
+            .unwrap();
+
+        let snap = shell.snapshot().await.unwrap();
+        assert!(snap.has_vfs(), "snapshot should capture in-memory VFS");
+
+        // Mutate the file after the snapshot.
+        shell
+            .execute("echo changed > /scratch/note.txt", &limits)
+            .await
+            .unwrap();
+        let changed = shell
+            .execute("cat /scratch/note.txt", &limits)
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&changed.stdout).contains("changed"));
+
+        // Restore: the file contents revert to the snapshot.
+        shell.restore(&snap).await.unwrap();
+        let restored = shell
+            .execute("cat /scratch/note.txt", &limits)
+            .await
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&restored.stdout).contains("original"),
+            "stdout: {:?}",
+            String::from_utf8_lossy(&restored.stdout)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fork_is_isolated() {
+        let limits = ResourceLimits::default();
+
+        let mut parent = Shell::builder().build().await.unwrap();
+        parent.execute("shared=base", &limits).await.unwrap();
+        parent
+            .execute("echo base > /scratch/f.txt", &limits)
+            .await
+            .unwrap();
+
+        // Fork inherits state + files.
+        let mut child = parent.fork().await.unwrap();
+        let inherited_var = child.execute("echo $shared", &limits).await.unwrap();
+        assert!(String::from_utf8_lossy(&inherited_var.stdout).contains("base"));
+        let inherited_file = child.execute("cat /scratch/f.txt", &limits).await.unwrap();
+        assert!(String::from_utf8_lossy(&inherited_file.stdout).contains("base"));
+
+        // Diverge both sides.
+        child.execute("shared=child", &limits).await.unwrap();
+        child
+            .execute("echo child > /scratch/f.txt", &limits)
+            .await
+            .unwrap();
+        parent.execute("shared=parent", &limits).await.unwrap();
+
+        // Child's changes don't leak to parent...
+        let p_var = parent.execute("echo $shared", &limits).await.unwrap();
+        assert_eq!(String::from_utf8_lossy(&p_var.stdout).trim(), "parent");
+        let p_file = parent.execute("cat /scratch/f.txt", &limits).await.unwrap();
+        assert_eq!(String::from_utf8_lossy(&p_file.stdout).trim(), "base");
+
+        // ...and parent's changes don't leak to child.
+        let c_var = child.execute("echo $shared", &limits).await.unwrap();
+        assert_eq!(String::from_utf8_lossy(&c_var.stdout).trim(), "child");
+        let c_file = child.execute("cat /scratch/f.txt", &limits).await.unwrap();
+        assert_eq!(String::from_utf8_lossy(&c_file.stdout).trim(), "child");
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_restore_vfs_into_fresh_shell() {
+        let limits = ResourceLimits::default();
+
+        // Capture a session (state + files) in shell A.
+        let mut a = Shell::builder().build().await.unwrap();
+        a.execute("greeting=hi", &limits).await.unwrap();
+        a.execute("echo hello > /scratch/a.txt", &limits)
+            .await
+            .unwrap();
+        let bytes = a.snapshot().await.unwrap().to_bytes().unwrap();
+
+        // Restore the whole session into a brand-new shell B.
+        let mut b = Shell::builder().build().await.unwrap();
+        b.restore(&Snapshot::from_bytes(&bytes).unwrap())
+            .await
+            .unwrap();
+
+        // Both the variable and the file came across.
+        let var = b.execute("echo $greeting", &limits).await.unwrap();
+        assert!(String::from_utf8_lossy(&var.stdout).contains("hi"));
+        let file = b.execute("cat /scratch/a.txt", &limits).await.unwrap();
+        assert!(String::from_utf8_lossy(&file.stdout).contains("hello"));
     }
 
     #[tokio::test]

@@ -719,6 +719,28 @@ impl<S: VfsStorage + Clone + 'static> ShellInstance<S> {
             .await
             .map_err(|e| RuntimeError::Wasm(format!("last_exit_code failed: {}", e)))
     }
+
+    /// Serialize the guest shell state to an opaque, versioned blob.
+    pub async fn snapshot(&mut self) -> Result<Vec<u8>, RuntimeError> {
+        let shell_interface = self.bindings.conch_shell_shell();
+        shell_interface
+            .instance()
+            .call_snapshot(&mut self.store, self.shell_resource)
+            .await
+            .map_err(|e| RuntimeError::Wasm(format!("snapshot failed: {}", e)))?
+            .map_err(RuntimeError::Wasm)
+    }
+
+    /// Restore guest shell state from a blob produced by [`Self::snapshot`].
+    pub async fn restore(&mut self, data: &[u8]) -> Result<(), RuntimeError> {
+        let shell_interface = self.bindings.conch_shell_shell();
+        shell_interface
+            .instance()
+            .call_restore(&mut self.store, self.shell_resource, data)
+            .await
+            .map_err(|e| RuntimeError::Wasm(format!("restore failed: {}", e)))?
+            .map_err(RuntimeError::Wasm)
+    }
 }
 
 /// Simple memory limiter for WASM execution.

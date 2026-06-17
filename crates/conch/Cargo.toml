@@ -29,6 +29,7 @@ futures.workspace = true
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+rmp-serde.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
 zstd.workspace = true

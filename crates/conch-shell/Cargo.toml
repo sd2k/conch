@@ -13,7 +13,7 @@ crate-type = ["cdylib"]
 # WIT bindings for component model exports
 wit-bindgen = { workspace = true }
 # Brush shell (using local patched version until wasm-js PR is merged)
-brush-core = { workspace = true }
+brush-core = { workspace = true, features = ["serde"] }
 brush-builtins = { workspace = true, features = [
         "builtin.echo",
         "builtin.printf",
@@ -54,7 +54,9 @@ thiserror.workspace = true
 
 # For builtins
 regex-lite.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+rmp-serde.workspace = true
 
 # jaq for proper jq implementation
 jaq-core = { workspace = true }
