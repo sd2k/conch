@@ -49,3 +49,28 @@ npm run preview
 package so the demo always reflects the current build. The Vite config aliases
 `@bytecodealliance/preview2-shim/*` to that package's browser shims (mirroring
 `js/testpkg/vitest.config.ts`).
+
+## Deployment
+
+The demo deploys to [Cloudflare Pages](https://pages.cloudflare.com/) (project
+`conch-demo`) from the `js` GitHub Actions workflow: pushes to `main` publish to
+`conch-demo.pages.dev`, and PRs get a per-branch preview deploy (the preview URL
+is commented on the PR). The deploy steps are skipped automatically when the
+`CLOUDFLARE_API_TOKEN` secret is absent (e.g. forks).
+
+The `.wasm` is shipped uncompressed (it's well under CF Pages' 25 MiB file
+limit); Cloudflare compresses it on the fly per request.
+
+**One-time Cloudflare setup** (required before deploys succeed):
+
+```bash
+# 1. Create the Pages project (once)
+npx wrangler pages project create conch-demo --production-branch main
+
+# 2. Add repo secrets (CF dashboard → API token with "Pages: Edit")
+gh secret set CLOUDFLARE_API_TOKEN
+gh secret set CLOUDFLARE_ACCOUNT_ID
+```
+
+A custom domain can be attached later in the Cloudflare Pages dashboard with no
+code change.
