@@ -16,9 +16,36 @@ env:
 permissions: {}
 
 jobs:
+  # The JS bindings are generated from the Rust shell wasm, so run on any code
+  # change (js/** or crates/**), skipping only docs-only PRs. Job-level `if:`
+  # keeps the required check reporting (skipped == passing).
+  changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            code:
+              - 'crates/**'
+              - 'js/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.github/workflows/js.yml'
+
   build:
     name: JavaScript bindings
     runs-on: ubuntu-latest
+    needs: changes
+    if: >-
+      github.event_name == 'push'
+      || needs.changes.outputs.code == 'true'
     steps:
       - uses: actions/checkout@v4
         with:
