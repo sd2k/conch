@@ -46,6 +46,10 @@ jobs:
     if: >-
       github.event_name == 'push'
       || needs.changes.outputs.code == 'true'
+    permissions:
+      contents: read
+      deployments: write
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -60,3 +64,48 @@ jobs:
       - name: Build browser demo
         working-directory: js
         run: mise run //js:demo-build
+
+      # Deploy js/demo/dist to Cloudflare Pages (project: conch-demo).
+      # Pushes to main publish; PRs get a per-branch preview deploy. The deploy
+      # steps no-op when CLOUDFLARE_API_TOKEN is unset (forks, or before the
+      # repo secrets are configured), so this job stays green either way.
+      - name: Check Cloudflare credentials
+        id: cf
+        env:
+          CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          if [ -n "$CF_TOKEN" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::CLOUDFLARE_API_TOKEN not set — skipping Pages deploy"
+          fi
+
+      - name: Deploy to Cloudflare Pages
+        id: deploy
+        if: >-
+          steps.cf.outputs.ready == 'true'
+          && github.event.pull_request.head.repo.fork != true
+          && github.actor != 'dependabot[bot]'
+          && github.ref_type != 'tag'
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: >-
+            pages deploy js/demo/dist
+            --project-name=conch-demo
+            --branch=${{ github.head_ref || github.ref_name }}
+            --commit-dirty=true
+
+      - name: Comment preview URL on PR
+        if: steps.deploy.outcome == 'success' && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          BODY="🌐 **Demo preview:** ${{ steps.deploy.outputs.pages-deployment-alias-url }}
+          📌 **This deploy:** ${{ steps.deploy.outputs.deployment-url }}"
+          gh pr comment ${{ github.event.pull_request.number }} \
+            --body "$BODY" --edit-last \
+          || gh pr comment ${{ github.event.pull_request.number }} \
+            --body "$BODY"
