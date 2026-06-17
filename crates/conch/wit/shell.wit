@@ -66,6 +66,22 @@ interface shell {
 
         /// Get the exit code from the last executed command ($?).
         last-exit-code: func() -> s32;
+
+        /// Serialize the shell's state to an opaque, versioned byte blob.
+        ///
+        /// Captures variables, functions, aliases, shell options, the working
+        /// directory, traps, and the directory stack. Runtime-only state
+        /// (builtins, open file descriptors, background jobs) is not included;
+        /// it is re-established on `restore`. Returns an error if serialization
+        /// fails.
+        snapshot: func() -> result<list<u8>, string>;
+
+        /// Restore shell state from a blob produced by `snapshot`.
+        ///
+        /// Replaces all current state with the snapshot's. Builtins are
+        /// re-attached automatically. Returns an error if the blob is malformed
+        /// or its format version is incompatible with this build.
+        restore: func(data: list<u8>) -> result<_, string>;
     }
 }
 
@@ -135,6 +151,18 @@ world shell-sandbox {
 
     /// Import: Host provides subprocess spawning capability.
     import process;
+
+    /// Export: The shell interface with persistent instance resource.
+    export shell;
+}
+
+/// Lite variant of the shell sandbox without subprocess spawning.
+///
+/// Used for browser/Node.js environments where subprocess component
+/// spawning is not available (it requires a host runtime like wasmtime).
+world shell-sandbox-lite {
+    /// Import: Host provides tool execution capability.
+    import tools;
 
     /// Export: The shell interface with persistent instance resource.
     export shell;

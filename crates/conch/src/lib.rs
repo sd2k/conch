@@ -42,6 +42,8 @@ mod limits;
 pub mod policy;
 mod runtime;
 mod shell;
+#[cfg(feature = "embedded-shell")]
+mod snapshot;
 
 #[cfg(test)]
 mod tests;
@@ -50,6 +52,10 @@ pub mod ffi;
 
 // Core Shell API
 pub use shell::{DynVfsStorage, Mount, Shell, ShellBuilder};
+
+// Session snapshots
+#[cfg(feature = "embedded-shell")]
+pub use snapshot::Snapshot;
 
 // Executor (for advanced usage)
 pub use executor::ComponentShellExecutor;
@@ -70,4 +76,6 @@ pub use limits::ResourceLimits;
 pub use runtime::{Conch, ExecutionResult, ExecutionStats, RuntimeError};
 
 // Re-export eryx-vfs types for VFS storage
-pub use eryx_vfs::{ArcStorage, DirPerms, FilePerms, InMemoryStorage, VfsStorage};
+pub use eryx_vfs::{
+    ArcStorage, DirPerms, FilePerms, InMemorySnapshot, InMemoryStorage, VfsStorage,
+};

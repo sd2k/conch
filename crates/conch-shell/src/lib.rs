@@ -190,6 +190,61 @@ impl exports::conch::shell::shell::GuestInstance for ShellInstance {
     fn last_exit_code(&self) -> i32 {
         *self.last_exit_code.borrow()
     }
+
+    /// Serialize the shell's state to a versioned MessagePack blob.
+    fn snapshot(&self) -> Result<Vec<u8>, String> {
+        let shell = self.shell.borrow();
+        let envelope = SnapshotRef {
+            version: SNAPSHOT_FORMAT_VERSION,
+            shell: &shell,
+        };
+        rmp_serde::to_vec_named(&envelope).map_err(|e| format!("snapshot failed: {e}"))
+    }
+
+    /// Restore shell state from a blob produced by `snapshot`.
+    fn restore(&self, data: Vec<u8>) -> Result<(), String> {
+        let envelope: SnapshotOwned =
+            rmp_serde::from_slice(&data).map_err(|e| format!("invalid snapshot: {e}"))?;
+        if envelope.version != SNAPSHOT_FORMAT_VERSION {
+            return Err(format!(
+                "incompatible snapshot version {} (this build expects {})",
+                envelope.version, SNAPSHOT_FORMAT_VERSION
+            ));
+        }
+
+        let mut shell = envelope.shell;
+
+        // Builtins are runtime-only (serde-skipped), so a deserialized shell has
+        // none. Re-attach the same set the constructor installs.
+        let mut shell_builtins =
+            brush_builtins::default_builtins(brush_builtins::BuiltinSet::BashMode);
+        builtins::register_builtins(&mut shell_builtins);
+        for (name, registration) in shell_builtins {
+            shell.register_builtin(name, registration);
+        }
+
+        *self.shell.borrow_mut() = shell;
+        *self.last_exit_code.borrow_mut() = 0;
+        Ok(())
+    }
+}
+
+/// Bumped whenever the serialized shell-state layout changes incompatibly
+/// (e.g. a brush upgrade that alters the AST). `restore` rejects mismatches.
+const SNAPSHOT_FORMAT_VERSION: u32 = 1;
+
+/// Borrowing view used when serializing a snapshot (avoids cloning the shell).
+#[derive(serde::Serialize)]
+struct SnapshotRef<'a> {
+    version: u32,
+    shell: &'a Shell,
+}
+
+/// Owning view used when deserializing a snapshot.
+#[derive(serde::Deserialize)]
+struct SnapshotOwned {
+    version: u32,
+    shell: Shell,
 }
 
 /// Wrapper that bridges the WIT `Child` resource to brush-core's `ExternalChild` trait.
@@ -405,6 +460,90 @@ mod tests {
             "greet World", // Should work
         ]);
         assert_eq!(results, Ok(vec![0, 0]));
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod snapshot_serde {
+    //! Guest-level test of the snapshot serde layer.
+    //!
+    //! Serializes a brush `Shell` (serde / MessagePack), restores it into a
+    //! *fresh* instance, and confirms that (a) variables survive and (b) a
+    //! user-defined function survives AND executes in the new instance,
+    //! correctly reading the restored variable. Complements the host-side
+    //! integration tests by exercising the serialization directly.
+    use brush_core::{ExecutionParameters, Shell, SourceInfo, openfiles};
+    use std::collections::HashMap;
+
+    async fn new_shell() -> Shell {
+        let mut shell_builtins =
+            brush_builtins::default_builtins(brush_builtins::BuiltinSet::BashMode);
+        crate::builtins::register_builtins(&mut shell_builtins);
+        let null_out = openfiles::null().unwrap();
+        let null_err = openfiles::null().unwrap();
+        Shell::builder()
+            .builtins(shell_builtins)
+            .fds(HashMap::from([(1, null_out), (2, null_err)]))
+            .build()
+            .await
+            .unwrap()
+    }
+
+    async fn run(shell: &mut Shell, script: &str) -> Result<i32, String> {
+        let result = shell
+            .run_string(
+                script,
+                &SourceInfo::default(),
+                &ExecutionParameters::default(),
+            )
+            .await
+            .map_err(|e| format!("exec error: {e}"))?;
+        Ok(i32::from(u8::from(result.exit_code)))
+    }
+
+    fn var(shell: &Shell, name: &str) -> Option<String> {
+        shell
+            .env()
+            .get(name)
+            .map(|(_, v)| v.value().to_cow_str(shell).into_owned())
+    }
+
+    #[test]
+    fn serde_round_trip_into_fresh_instance() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            // 1. Original shell: a variable + a function that reads it.
+            //    Function body is a pure assignment so it needs no builtins.
+            let mut original = new_shell().await;
+            run(&mut original, "x=42").await.unwrap();
+            run(&mut original, r#"greet() { result="hi-${1}-${x}"; }"#)
+                .await
+                .unwrap();
+
+            // 2. Snapshot via MessagePack (compact binary, self-describing).
+            let snapshot = rmp_serde::to_vec_named(&original).expect("msgpack serialize Shell");
+
+            // 3. Restore into a brand-new, independent Shell.
+            let mut restored: Shell =
+                rmp_serde::from_slice(&snapshot).expect("msgpack deserialize Shell");
+
+            // Variable survived the round-trip.
+            assert_eq!(var(&restored, "x").as_deref(), Some("42"));
+
+            // 4. The restored function executes in the fresh instance and reads
+            //    the restored variable + its argument.
+            let code = run(&mut restored, "greet world").await.unwrap();
+            assert_eq!(code, 0, "restored function failed to run");
+            assert_eq!(
+                var(&restored, "result").as_deref(),
+                Some("hi-world-42"),
+                "restored function did not execute correctly in fresh instance"
+            );
+        });
     }
 }
 

@@ -18,7 +18,7 @@ wasmtime-wasi = { version = "44", features = ["p3"] }
 wasmtime-wasi-io = "44"
 
 # VFS for WASI filesystem shadowing (released crate; tracks wasmtime 44).
-eryx-vfs = "0.5.0"
+eryx-vfs = { version = "0.5.0", features = ["serde"] }
 
 # Async
 tokio = { version = "1" }
@@ -28,6 +28,9 @@ futures = "0.3"
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# MessagePack: compact binary, but self-describing (handles brush's serde types
+# that bincode's non-self-describing format rejects).
+rmp-serde = "1"
 
 # Shell builtins (for WASM guest)
 regex-lite = "0.1"
@@ -96,3 +99,9 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+
+# Until eryx-vfs with the snapshot API + `serde` feature is published to
+# crates.io, pull it from the eryx repo. Tracks the `feat/vfs-snapshot` branch
+# (eryx-org/eryx PR). Drop this patch once eryx-vfs 0.6 is released.
+[patch.crates-io]
+eryx-vfs = { git = "https://github.com/eryx-org/eryx", rev = "96467699fa7a0e15e96b2bd736c4d6d159847a3e" }
