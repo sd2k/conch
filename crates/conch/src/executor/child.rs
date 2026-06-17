@@ -80,6 +80,9 @@ fn create_child_engine() -> Result<Engine, String> {
     // Go programs need a larger stack
     config.max_wasm_stack(8 * 1024 * 1024);
     config.async_stack_size(8 * 1024 * 1024);
+    // Persist cranelift output so child components aren't recompiled every
+    // nextest process. Transparent; only affects speed.
+    super::enable_compilation_cache(&mut config);
     Engine::new(&config).map_err(|e| format!("failed to create child engine: {e}"))
 }
 

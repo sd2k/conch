@@ -447,6 +447,9 @@ impl ComponentShellExecutor {
         // Host imports marked `async` in bindgen use fiber-based async:
         // the host can await on tokio channels, guest sees blocking calls.
         config.epoch_interruption(true);
+        // Persist cranelift output to disk so the embedded shell isn't
+        // re-JITed in every nextest process. Transparent; only affects speed.
+        super::enable_compilation_cache(&mut config);
         Engine::new(&config).map_err(|e| RuntimeError::Wasm(e.to_string()))
     }
 
