@@ -1,11 +1,12 @@
 # See https://nexte.st/docs/configuration/
 
 # The conch-grpc integration tests each spin up a full wasmtime shell. Running
-# them concurrently (with each other and the heavy WASM tests in the rest of
-# the workspace) starves CPU and trips their in-test timeouts. Bound them to
-# one at a time so they stay fast and deterministic.
+# all of them fully concurrently (with the heavy WASM tests in the rest of the
+# workspace) starves CPU and trips their in-test timeouts. Bound the group to a
+# few at a time — enough parallelism to be fast, capped to avoid the contention
+# that (together with the generous 60s in-test timeout) caused flakes.
 [test-groups.conch-grpc-serial]
-max-threads = 1
+max-threads = 3
 
 [profile.default]
 # Print slow tests after the run
