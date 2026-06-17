@@ -25,9 +25,21 @@
 // Import the jco-generated bindings
 import { shell } from "./conch-shell.js";
 import { _setStdout, _setStderr } from "./shims/cli.js";
+import { initStdin } from "./stdin.js";
 
 // Re-export the low-level Instance class for advanced use cases
 export { shell };
+
+// Install a default (empty/EOF) stdin handler as soon as the package loads.
+// The browser preview2-shim ships an unimplemented stdin stub that returns
+// `undefined`, so any command that reads stdin without piped input (`jq`,
+// `cat`, `grep`, `wc`, `read`, ...) would otherwise throw "Cannot read
+// properties of undefined (reading 'byteLength')" mid-execute. That host-side
+// throw unwinds the wasm stack without dropping the shell's RefCell borrow,
+// poisoning the instance so every subsequent command panics with "RefCell
+// already borrowed". Initializing stdin here makes reads return EOF instead.
+// Callers can still override the buffer later via `@bsull/conch/stdin`.
+initStdin();
 
 const symbolDispose = Symbol.dispose ?? Symbol.for("dispose");
 const textDecoder = new TextDecoder();
