@@ -56,3 +56,7 @@ jobs:
       - name: Build and test JavaScript bindings
         working-directory: js
         run: mise run //js:test
+
+      - name: Build browser demo
+        working-directory: js
+        run: mise run //js:demo-build

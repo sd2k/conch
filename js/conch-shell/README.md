@@ -120,7 +120,7 @@ try {
 The shell includes these built-in commands:
 
 - **I/O**: `echo`, `cat`, `read`
-- **File operations**: `head`, `tail`, `wc`
+- **File operations**: `ls`, `head`, `tail`, `wc`, `mkdir`, `touch`, `rm`, `cp`, `mv`
 - **Text processing**: `grep`
 - **JSON**: `jq` (via jaq)
 - **Utilities**: `test`, `true`, `false`, `pwd`, `cd`, `export`, `set`
@@ -216,7 +216,7 @@ This package works out of the box in both browsers and Node.js with the same beh
 - **No network access**: Network operations are not available in the sandbox
 - **Single-threaded**: The shell runs in a single-threaded environment
 - **Memory limits**: Subject to WebAssembly memory constraints
-- **Some commands unavailable**: Commands like `ls`, `sed`, `awk`, `sort`, `printf` are not yet implemented
+- **Some commands unavailable**: Commands like `sed`, `awk`, `sort`, `printf`, `cut`, `tr`, `find`, `seq` are not yet implemented
 
 ## Platform Support
 

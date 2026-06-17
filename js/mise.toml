@@ -1,6 +1,10 @@
 [tools]
 node = "24"
-"npm:@bytecodealliance/jco" = "latest"
+# Pinned for reproducible transpile output. jco emits an invalid `const`
+# reassignment (and a `for...in` over an array) in the dead-code _liftFlatRecord
+# helper; rolldown rejects the const reassignment when bundling the demo, so the
+# patch-js task rewrites both. Keep this pin in sync with those patches.
+"npm:@bytecodealliance/jco" = "1.16.1"
 
 # =============================================================================
 # JavaScript bindings tasks (browser/Node.js via jco)
@@ -38,7 +42,7 @@ jco types \
 """
 
 [tasks.patch-js]
-description = "Patch generated JS for webpack compatibility (node:fs/promises)"
+description = "Patch generated JS (webpack node:fs/promises + jco _liftFlatRecord codegen)"
 depends = ["transpile"]
 sources = ["conch-shell/conch-shell.js"]
 outputs = ["conch-shell/conch-shell.js"]
@@ -79,6 +83,38 @@ if (code.includes(original)) {
   console.error('Warning: Could not find expected pattern in conch-shell.js');
   process.exit(1);
 }
+
+// Fix two bugs jco emits in the _liftFlatRecord helper:
+//  1. it destructures `storagePtr` with `const` then reassigns it — rolldown
+//     rejects this when bundling (and it would throw at runtime if ever hit).
+//  2. it iterates the lift-fn array with `for...in` (indices) instead of
+//     `for...of` (values).
+// These live in dead code for this component (testpkg passes without the fix),
+// but the const reassignment blocks the production bundler, so rewrite both.
+// Non-fatal if absent: a future jco may fix the codegen, making this a no-op.
+const liftConst = 'const { memory, useDirectParams, storagePtr, storageLen, params } = ctx;';
+const liftLet = 'let { memory, useDirectParams, storagePtr, storageLen, params } = ctx;';
+if (code.includes(liftConst)) {
+  code = code.replace(liftConst, liftLet);
+  fs.writeFileSync(path, code);
+  console.log('Patched _liftFlatRecord const reassignment');
+} else if (code.includes(liftLet)) {
+  console.log('_liftFlatRecord const already patched');
+} else {
+  console.log('Note: _liftFlatRecord const pattern not found (jco may have fixed it)');
+}
+
+const liftForIn = 'for (const [key, liftFn, alignment32] in keysAndLiftFns) {';
+const liftForOf = 'for (const [key, liftFn, alignment32] of keysAndLiftFns) {';
+if (code.includes(liftForIn)) {
+  code = code.replace(liftForIn, liftForOf);
+  fs.writeFileSync(path, code);
+  console.log('Patched _liftFlatRecord for...in -> for...of');
+} else if (code.includes(liftForOf)) {
+  console.log('_liftFlatRecord for...of already patched');
+} else {
+  console.log('Note: _liftFlatRecord for...in pattern not found (jco may have fixed it)');
+}
 """
 
 [tasks.build]
@@ -103,6 +139,26 @@ run = """
 cd ../conch-shell && npm ci
 cd ../testpkg && npm ci && npm run typecheck && npm run test:ci
 """
+
+[tasks.demo-deps]
+description = "Install the browser demo's dependencies (links local @bsull/conch)"
+depends = ["build"]
+dir = "demo"
+sources = ["demo/package.json"]
+outputs = ["demo/node_modules/.package-lock.json"]
+run = "npm install"
+
+[tasks.demo]
+description = "Run the interactive browser demo (xterm.js + @bsull/conch) dev server"
+depends = ["demo-deps"]
+dir = "demo"
+run = "npm run dev"
+
+[tasks.demo-build]
+description = "Build the browser demo for production (dist/)"
+depends = ["demo-deps"]
+dir = "demo"
+run = "npm run build"
 
 [tasks.clean]
 description = "Clean JavaScript build artifacts (generated files only)"

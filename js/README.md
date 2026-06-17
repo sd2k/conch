@@ -180,7 +180,7 @@ This package works out of the box in both browsers and Node.js with the same beh
 
 3. **stdout/stderr**: Output goes to the WASI shim's stdout/stderr, which by default prints to `console.log`/`console.error`.
 
-4. **Some commands unavailable**: Commands like `ls`, `sed`, `awk`, `sort`, `printf` are not yet implemented and will fail with "operation not supported on this platform".
+4. **Some commands unavailable**: Commands like `sed`, `awk`, `sort`, `printf`, `cut`, `tr`, `find`, `seq` are not yet implemented and will fail with "operation not supported on this platform".
 
 5. **Single-threaded**: The shell runs in a single-threaded environment.
 
