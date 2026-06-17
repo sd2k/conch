@@ -187,26 +187,20 @@ jobs:
 
       - uses: ./.github/actions/setup-rust
 
+      # Examples are a bitrot check, so build in dev (not release): the
+      # release-opt compile dominated this job, while wasmtime stays optimized
+      # via the [profile.dev.package] override. Build all examples once (one
+      # parallel compile) then run the prebuilt binaries.
+      - name: Build examples
+        run: cargo build --package conch --examples --features embedded-shell
+
       - name: Run examples
         run: |
-          echo "=== basic ==="
-          cargo run --package conch --example basic --features embedded-shell --release
-          echo "=== vfs_mounts ==="
-          cargo run --package conch --example vfs_mounts --features embedded-shell --release
-          echo "=== low_level ==="
-          cargo run --package conch --example low_level --features embedded-shell --release
-          echo "=== custom_storage ==="
-          cargo run --package conch --example custom_storage --features embedded-shell --release
-          echo "=== agent_sandbox ==="
-          cargo run --package conch --example agent_sandbox --features embedded-shell --release
-          echo "=== tool_execution ==="
-          cargo run --package conch --example tool_execution --features embedded-shell --release
-          echo "=== external_tools ==="
-          cargo run --package conch --example external_tools --features embedded-shell --release
-          echo "=== approval_and_policy ==="
-          cargo run --package conch --example approval_and_policy --features embedded-shell --release
-          echo "=== policy_enforcement ==="
-          cargo run --package conch --example policy_enforcement --features embedded-shell --release
+          for ex in basic vfs_mounts low_level custom_storage agent_sandbox \
+                    tool_execution external_tools approval_and_policy policy_enforcement; do
+            echo "=== $ex ==="
+            cargo run --package conch --example "$ex" --features embedded-shell
+          done
 
   # Test Go FFI bindings
   go-bindings:
