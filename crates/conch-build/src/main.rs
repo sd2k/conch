@@ -11,6 +11,7 @@
 //! conch-build <name>          Build clis/<name>.toml (e.g. `conch-build gh`)
 //! conch-build <path.toml>     Build a manifest at an explicit path
 //! conch-build --list          List available manifests in clis/
+//! conch-build --check         Validate all manifests without building (CI gate)
 //! ```
 //!
 //! Run from the repo root (the mise `build-cli` task does this). Toolchains
@@ -48,6 +49,7 @@ fn run(args: &[String]) -> Result<()> {
             Ok(())
         }
         Some("--list") => list_manifests(),
+        Some("--check") => check_all_manifests(),
         Some(arg) => {
             let path = resolve_manifest_path(arg);
             let manifest = Manifest::load(&path)?;
@@ -74,25 +76,73 @@ fn resolve_manifest_path(arg: &str) -> PathBuf {
     }
 }
 
-fn list_manifests() -> Result<()> {
+/// Collect the paths of all `*.toml` manifests in `clis/`, sorted.
+fn manifest_paths() -> Result<Vec<PathBuf>> {
     let dir = PathBuf::from(CLIS_DIR);
     let entries = std::fs::read_dir(&dir)
         .with_context(|| format!("reading manifest dir {}", dir.display()))?;
-    let mut names: Vec<String> = entries
+    let mut paths: Vec<PathBuf> = entries
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("toml"))
-        .filter_map(|p| p.file_stem().and_then(|s| s.to_str()).map(str::to_string))
         .collect();
-    names.sort();
-    if names.is_empty() {
+    paths.sort();
+    if paths.is_empty() {
         bail!("no manifests found in {}", dir.display());
     }
+    Ok(paths)
+}
+
+fn list_manifests() -> Result<()> {
     eprintln!("Available CLI manifests:");
-    for name in names {
-        println!("  {name}");
+    for path in manifest_paths()? {
+        if let Some(name) = path.file_stem().and_then(|s| s.to_str()) {
+            println!("  {name}");
+        }
     }
     Ok(())
+}
+
+/// Validate every manifest in `clis/` without building: parse it, and check
+/// any referenced `vendor_patch` script exists. Reproducible in CI (no
+/// toolchains needed); guards against manifest bit-rot. Returns an error if any
+/// manifest is invalid.
+fn check_all_manifests() -> Result<()> {
+    let paths = manifest_paths()?;
+    let mut failures = 0usize;
+    for path in &paths {
+        match check_one(path) {
+            Ok(manifest) => eprintln!(
+                "  ok   {} — {:?} lane, {} @ {}",
+                path.display(),
+                manifest.lang,
+                manifest.source.repo,
+                manifest.source.git_ref
+            ),
+            Err(e) => {
+                eprintln!("  FAIL {} — {e:#}", path.display());
+                failures += 1;
+            }
+        }
+    }
+    if failures > 0 {
+        bail!("{failures} of {} manifest(s) invalid", paths.len());
+    }
+    eprintln!("All {} manifest(s) valid.", paths.len());
+    Ok(())
+}
+
+/// Parse one manifest and validate cheap, toolchain-free invariants.
+fn check_one(path: &std::path::Path) -> Result<Manifest> {
+    let manifest = Manifest::load(path)?;
+    // The vendor patch is tracked in-repo, so its existence is checkable in CI.
+    // (source.dir lives in gitignored scratch/, so it's intentionally not checked.)
+    if let Some(patch) = &manifest.build.vendor_patch
+        && !patch.exists()
+    {
+        bail!("vendor_patch {} does not exist", patch.display());
+    }
+    Ok(manifest)
 }
 
 fn print_usage() {
@@ -101,6 +151,7 @@ fn print_usage() {
          Usage:\n  \
          conch-build <name>        Build clis/<name>.toml\n  \
          conch-build <path.toml>   Build a manifest at an explicit path\n  \
-         conch-build --list        List available manifests"
+         conch-build --list        List available manifests\n  \
+         conch-build --check       Validate all manifests (no build)"
     );
 }
