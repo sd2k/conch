@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/conch", "crates/conch-cli", "crates/conch-grpc", "crates/conch-mcp", "crates/conch-shell", "crates/conch-test-cmd"]
+members = ["crates/conch", "crates/conch-build", "crates/conch-cli", "crates/conch-grpc", "crates/conch-mcp", "crates/conch-shell", "crates/conch-test-cmd"]
 exclude = ["vendor", "scratch"]
 
 [workspace.package]
@@ -28,6 +28,8 @@ futures = "0.3"
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Manifest parsing for the conch-build CLI component driver.
+toml = "0.8"
 
 # Shell builtins (for WASM guest)
 regex-lite = "0.1"

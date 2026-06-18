@@ -7,8 +7,11 @@ config_roots = ["js"]
 [tools]
 rust = "1.92"
 
+# Pinned to 1.245.1: the Go (wasip3) lane needs this version's support for the
+# async `wasi:cli/run` world (`task-return`). Older releases (e.g. 1.236.1) fail
+# `component new` with "no export `run` found".
 [tools."github:bytecodealliance/wasm-tools"]
-version = "1.236.1"
+version = "1.245.1"
 
 # wasmtime CLI, used to pre-compile components to cwasm for fast startup.
 # This MUST match the `wasmtime` crate version in Cargo.lock: cwasm is only
@@ -170,6 +173,20 @@ depends = ["wasm-target"]
 sources = ["crates/conch-test-cmd/src/**/*.rs"]
 outputs = ["target/wasm32-wasip2/release/conch-test-cmd.wasm"]
 run = "cargo build -p conch-test-cmd --target wasm32-wasip2 --release"
+
+[tasks.build-cli]
+description = "Build a CLI component from its manifest (clis/<name>.toml) via the conch-build driver"
+usage = "mise run build-cli -- <name|path.toml>"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+NAME="${1:?Usage: mise run build-cli -- <name|path.toml> (e.g. gh, gcx)}"
+cargo run -q -p conch-build -- "$NAME"
+"""
+
+[tasks.list-clis]
+description = "List available CLI build manifests"
+run = "cargo run -q -p conch-build -- --list"
 
 [tasks.compile-shell-cwasm]
 description = "Pre-compile shell to cwasm for fast startup (~0.2s vs ~2.5s)"

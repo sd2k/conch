@@ -1,0 +1,148 @@
+//! Go lane: builds a CLI to wasip3 using the experimental Go fork, then
+//! componentizes with `wasm-tools`. Ports `scratch/build-gh-wasm.sh` and
+//! `scratch/build-gcx-wasm.sh` into a manifest-driven flow.
+//!
+//! Toolchain inputs (not per-CLI, so sourced from the environment):
+//! - `CONCH_GO_WASIP3_ROOT` — GOROOT of the wasip3 Go fork
+//!   (default `scratch/go-wasip3`). The WIT dir is derived from it.
+//! - `wasm-tools` and `wasmtime` are taken from `PATH` (mise provides them).
+
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result, bail};
+
+use super::run;
+use crate::manifest::Manifest;
+
+/// Default location of the wasip3 Go fork, relative to the repo root.
+const DEFAULT_GOROOT: &str = "scratch/go-wasip3";
+
+pub fn build(manifest: &Manifest) -> Result<()> {
+    let repo_root = std::env::current_dir().context("getting current dir")?;
+
+    // Resolve the wasip3 Go toolchain.
+    let goroot = match std::env::var_os("CONCH_GO_WASIP3_ROOT") {
+        Some(p) => PathBuf::from(p),
+        None => repo_root.join(DEFAULT_GOROOT),
+    };
+    let go_bin = goroot.join("bin/go");
+    if !go_bin.exists() {
+        bail!(
+            "wasip3 Go toolchain not found at {} — clone/build the fork or set \
+             CONCH_GO_WASIP3_ROOT (see #53 for the pinned toolchain image)",
+            go_bin.display()
+        );
+    }
+    let wit_dir = goroot.join("src/internal/wasi/wit");
+    if !wit_dir.exists() {
+        bail!("WIT dir not found at {}", wit_dir.display());
+    }
+
+    let source_dir = repo_root.join(&manifest.source.dir);
+    if !source_dir.exists() {
+        bail!(
+            "source dir {} not found — check out {} @ {} there",
+            source_dir.display(),
+            manifest.source.repo,
+            manifest.source.git_ref
+        );
+    }
+    let output_dir = repo_root.join(&manifest.output.dir);
+    std::fs::create_dir_all(&output_dir)
+        .with_context(|| format!("creating output dir {}", output_dir.display()))?;
+
+    let goroot_s = path_str(&goroot)?;
+    let go_bin_s = path_str(&go_bin)?;
+    let wit_s = path_str(&wit_dir)?;
+    let out_wasm = output_dir.join(format!("{}.wasm", manifest.name));
+    let out_wasm_s = path_str(&out_wasm)?;
+
+    eprintln!("=== [{}] Step 1: vendor dependencies ===", manifest.name);
+    run(
+        &go_bin_s,
+        &["mod", "vendor"],
+        &source_dir,
+        &[("GOROOT", &goroot_s)],
+    )?;
+
+    if let Some(patch) = &manifest.build.vendor_patch {
+        eprintln!("=== [{}] Step 2: patch vendor tree ===", manifest.name);
+        let patch_abs = repo_root.join(patch);
+        if !patch_abs.exists() {
+            bail!("vendor_patch script {} not found", patch_abs.display());
+        }
+        let patch_s = path_str(&patch_abs)?;
+        run("bash", &[&patch_s], &source_dir, &[])?;
+    }
+
+    eprintln!(
+        "=== [{}] Step 3: compile to wasm32 (wasip3) ===",
+        manifest.name
+    );
+    run(
+        &go_bin_s,
+        &[
+            "build",
+            "-mod=vendor",
+            "-o",
+            &out_wasm_s,
+            &manifest.build.package,
+        ],
+        &source_dir,
+        &[
+            ("GOROOT", &goroot_s),
+            ("GOOS", "wasip3"),
+            ("GOARCH", "wasm32"),
+        ],
+    )?;
+
+    eprintln!("=== [{}] Step 4: componentize ===", manifest.name);
+    let embedded = output_dir.join("embedded.wasm");
+    let component = output_dir.join("component.wasm");
+    let embedded_s = path_str(&embedded)?;
+    let component_s = path_str(&component)?;
+    run(
+        "wasm-tools",
+        &[
+            "component",
+            "embed",
+            "--all-features",
+            &wit_s,
+            "--world",
+            &manifest.component.world,
+            &out_wasm_s,
+            "-o",
+            &embedded_s,
+        ],
+        &repo_root,
+        &[],
+    )?;
+    run(
+        "wasm-tools",
+        &["component", "new", &embedded_s, "-o", &component_s],
+        &repo_root,
+        &[],
+    )?;
+    std::fs::remove_file(&embedded).ok();
+
+    if manifest.cwasm.enabled {
+        eprintln!("=== [{}] Step 5: pre-compile to cwasm ===", manifest.name);
+        let cwasm = output_dir.join(format!("{}.cwasm", manifest.name));
+        let cwasm_s = path_str(&cwasm)?;
+        let mut args: Vec<&str> = vec!["compile"];
+        args.extend(manifest.cwasm.flags.iter().map(String::as_str));
+        args.extend([component_s.as_str(), "-o", cwasm_s.as_str()]);
+        run("wasmtime", &args, &repo_root, &[])?;
+        eprintln!("  → {}", cwasm.display());
+    }
+
+    eprintln!("=== [{}] done → {} ===", manifest.name, component.display());
+    Ok(())
+}
+
+/// Convert a path to `&str`, erroring on non-UTF-8 (which our tools can't handle).
+fn path_str(p: &Path) -> Result<String> {
+    p.to_str()
+        .map(str::to_string)
+        .with_context(|| format!("path is not valid UTF-8: {}", p.display()))
+}

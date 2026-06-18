@@ -1,0 +1,19 @@
+[package]
+name = "conch-build"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Manifest-driven, multi-lane build driver for conch CLI components"
+
+[[bin]]
+name = "conch-build"
+path = "src/main.rs"
+
+[dependencies]
+serde.workspace = true
+toml.workspace = true
+anyhow.workspace = true
+
+[lints]
+workspace = true
