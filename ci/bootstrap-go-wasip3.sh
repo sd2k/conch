@@ -35,7 +35,9 @@ git -C "$DEST" fetch origin "$GO_WASIP3_REF"
 git -C "$DEST" checkout --quiet "$GO_WASIP3_COMMIT"
 
 log "building the toolchain (make.bash)…"
-( cd "$DEST/src" && GOTOOLCHAIN=local bash make.bash )
+# make.bash logs to stdout; redirect to stderr so this script's stdout is
+# only the final GOROOT path (callers capture it).
+( cd "$DEST/src" && GOTOOLCHAIN=local bash make.bash ) >&2
 
 if [ ! -x "$DEST/bin/go" ]; then
     log "ERROR: build did not produce $DEST/bin/go"
