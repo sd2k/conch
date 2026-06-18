@@ -58,34 +58,39 @@ The driver uses tools from `PATH` (mise provides them) plus the Go fork:
   "no export `run` found".
 - **wasmtime** (CLI) — pinned to match the `wasmtime` crate in `Cargo.lock`
   (`mise run check-wasmtime-version`). Used for the optional cwasm step.
-- **wasip3 Go fork** — `jellevandenhooff/go`, not yet pinned/hermetic. The driver
-  looks for it at `scratch/go-wasip3` or `$CONCH_GO_WASIP3_ROOT`. Making this
-  reproducible (a pinned image) is issue #53.
+- **wasip3 Go fork** — our controlled fork **`sd2k/go`**, branch
+  `wasip3-2026-03-15`, ported to the WASI `0.3.0-rc-2026-03-15` snapshot that
+  wasmtime 44.x implements. `ci/bootstrap-go-wasip3.sh` clones + builds the
+  pinned commit and prints the GOROOT; the driver finds it via
+  `$CONCH_GO_WASIP3_ROOT` (or `scratch/go-wasip3`). Bump the pin in that script
+  when moving the fork (issue #53).
 
-## Known issue: wasi p3 snapshot skew (blocks `gh` at runtime) — #53/#27
+## wasi p3 snapshot: keeping host and guest in lockstep (#53/#27)
 
-The Go lane **builds** `gh` reproducibly today, but the resulting component does
-not yet **instantiate** in the conch host:
+Component instantiation is **version-exact**: the `gh` component must import the
+same wasi p3 snapshot the host (the `wasmtime` crate) implements, or you get:
 
 ```
-component imports instance `wasi:cli/environment@0.3.0-rc-2026-02-09`,
+component imports instance `wasi:cli/...@0.3.0-rc-<DATE>`,
 but a matching implementation was not found in the linker
 ```
 
-Cause — a wasi Preview 3 snapshot mismatch between the host and the guest:
-
 | Component | wasi p3 snapshot |
 |-----------|------------------|
-| go-wasip3 fork @ a414d8c7 (guest WIT) | `0.3.0-rc-2026-02-09` |
-| source-built wasmtime 44.0.0 (old path dep, demo worked) | `0.3.0-rc-2026-02-09` ✅ |
-| **crates.io wasmtime 44.0.3 (current crate)** | **`0.3.0-rc-2026-03-15`** ❌ |
+| `wasmtime` crate 44.x (the conch host) | `0.3.0-rc-2026-03-15` |
+| **sd2k/go fork @ `wasip3-2026-03-15`** (guest) | `0.3.0-rc-2026-03-15` ✅ |
+| upstream jellevandenhooff/go @ a414d8c7 (old) | `0.3.0-rc-2026-02-09` ❌ |
 
-The original `gh pr list | upper` demo worked because the host (scratch wasmtime
-44.0.0) and the Go fork agreed on the `02-09` snapshot. De-pinning to the
-published wasmtime `44.x` advanced the host to `03-15`, ahead of the fork.
+When this de-synced (the de-pin to published wasmtime moved the host to `03-15`
+while the upstream fork was on `02-09`), the fix was to **port the fork
+forward** rather than pin wasmtime back (eryx-vfs requires `^44.0.2`, so
+`=44.0.0` won't resolve). The port lives in `sd2k/go`; porting notes:
+- the `02-09 → 03-15` deltas are `enum → variant` error-code/descriptor-type
+  (filesystem, sockets) and a `random` param rename;
+- wasm-tools spells async funcs `[async method]`/`[async]` in `03-15` — witgen
+  was taught to normalize those to canonical names;
+- componentizing the async `wasi:cli/run` export needs wasm-tools `>= 1.246.2`.
 
-**Fix (toolchain work, tracked in #53):** advance the wasip3 Go fork to a commit
-whose bundled WIT targets `0.3.0-rc-2026-03-15`, rebuild the fork, and re-run
-`mise run build-cli -- gh`. (Pinning the wasmtime crate back to `=44.0.0`
-conflicts with eryx-vfs's `^44` requirement, so moving the fork forward is the
-right direction.)
+The `gh demo (wasip3)` workflow (`.github/workflows/gh-demo.yml`) rebuilds the
+toolchain + `gh` and runs `gh --version` through conch in CI, so a future
+host/fork de-sync fails loudly.

@@ -7,11 +7,12 @@ config_roots = ["js"]
 [tools]
 rust = "1.92"
 
-# Pinned to 1.245.1: the Go (wasip3) lane needs this version's support for the
-# async `wasi:cli/run` world (`task-return`). Older releases (e.g. 1.236.1) fail
-# `component new` with "no export `run` found".
+# Pinned to 1.246.2: the Go (wasip3) lane targets the WASI 0.3.0-rc-2026-03-15
+# snapshot (matching wasmtime 44.x); componentizing its async `wasi:cli/run`
+# export needs wasm-tools >= 1.246.2. Older releases fail `component new` with
+# "no export `run` found".
 [tools."github:bytecodealliance/wasm-tools"]
-version = "1.245.1"
+version = "1.246.2"
 
 # wasmtime CLI, used to pre-compile components to cwasm for fast startup.
 # This MUST match the `wasmtime` crate version in Cargo.lock: cwasm is only
