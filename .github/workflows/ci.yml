@@ -181,10 +181,12 @@ jobs:
         # Other crates require embedded-shell which needs the WASM artifact
         run: cargo check -p conch --no-default-features
 
-  # Validate the CLI build manifests (clis/*.toml) parse and reference existing
-  # files. Cheap and toolchain-free (no wasm/Go fork), so it runs standalone and
-  # catches manifest bit-rot on every PR. The actual component rebuild lives in
-  # the scheduled rebuild-cli-components workflow (needs the Go toolchain, #53).
+  # Validate the build pipeline's reproducibility invariants. No wasm/Go fork
+  # needed, so it runs standalone and catches bit-rot on every PR:
+  #   - the wasmtime CLI pin matches the wasmtime crate in Cargo.lock, and
+  #   - every clis/*.toml manifest parses and references existing files.
+  # The actual component rebuild lives in the scheduled rebuild-cli-components
+  # workflow (needs the Go toolchain, #53).
   manifests:
     name: CLI Manifests
     runs-on: ubuntu-latest
@@ -200,12 +202,15 @@ jobs:
       - name: Configure Rust cache
         uses: Swatinem/rust-cache@v2
 
+      # Default mise.toml so the pinned wasmtime CLI is available for the
+      # version check below (also provides rust to build conch-build).
       - name: Install mise
         uses: jdx/mise-action@v3
         with:
-          mise_toml: |
-            [tools]
-            rust = "1.92"
+          cache: false
+
+      - name: Check wasmtime CLI matches the crate
+        run: mise run check-wasmtime-version
 
       - name: Validate manifests
         run: cargo run -p conch-build -- --check

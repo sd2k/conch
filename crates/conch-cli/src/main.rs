@@ -60,6 +60,13 @@ async fn main() {
         i += 1;
     }
 
+    // --sandbox-root only affects spawned commands, which require --commands-dir.
+    if sandbox_root.is_some() && commands_dir.is_none() {
+        eprintln!(
+            "conch: --sandbox-root has no effect without --commands-dir (no spawned commands to sandbox)"
+        );
+    }
+
     let script = match script_source {
         Some(ScriptSource::Inline(s)) => s,
         Some(ScriptSource::File(path)) => match std::fs::read_to_string(&path) {
@@ -149,7 +156,9 @@ fn load_commands_from_dir(dir: &std::path::Path) -> Result<ComponentRegistry, St
 
     let entries = std::fs::read_dir(dir).map_err(|e| format!("failed to read directory: {e}"))?;
 
-    // Collect paths, sorted so .cwasm comes after .wasm and overwrites it
+    // Collect paths, sorted so .cwasm is processed before .wasm (`c` < `w`); the
+    // later .wasm is then skipped by the `registry.contains` guard below, so the
+    // pre-compiled cwasm wins when both exist.
     let mut paths: Vec<_> = entries
         .filter_map(|e| e.ok())
         .map(|e| e.path())
