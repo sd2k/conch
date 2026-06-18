@@ -176,8 +176,7 @@ outputs = ["target/wasm32-wasip2/release/conch-test-cmd.wasm"]
 run = "cargo build -p conch-test-cmd --target wasm32-wasip2 --release"
 
 [tasks.build-cli]
-description = "Build a CLI component from its manifest (clis/<name>.toml) via the conch-build driver"
-usage = "mise run build-cli -- <name|path.toml>"
+description = "Build a CLI component from its manifest (clis/<name>.toml) via the conch-build driver. Usage: mise run build-cli -- <name|path.toml>"
 run = """
 #!/usr/bin/env bash
 set -euo pipefail
