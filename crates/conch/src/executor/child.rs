@@ -40,6 +40,8 @@ pub(crate) struct ChildProcess {
     env: Vec<(String, String)>,
     /// Working directory.
     cwd: String,
+    /// Sandbox root mounted at `/` for this child. `None` mounts the real `/`.
+    sandbox_root: Option<std::path::PathBuf>,
     /// Accumulated stdin data.
     pub stdin_buffer: Vec<u8>,
     /// Whether stdin has been closed (no more writes allowed).
@@ -119,6 +121,7 @@ pub(crate) fn spawn_child(
     args: &[String],
     env: &[(String, String)],
     cwd: &str,
+    sandbox_root: Option<std::path::PathBuf>,
 ) -> Result<ChildProcess, String> {
     let engine = child_engine()?;
 
@@ -141,6 +144,7 @@ pub(crate) fn spawn_child(
         args: full_args,
         env: env.to_vec(),
         cwd: cwd.to_string(),
+        sandbox_root,
         stdin_buffer: Vec::new(),
         stdin_closed: false,
         result_rx: None,
@@ -225,6 +229,7 @@ impl ChildProcess {
         let args = self.args.clone();
         let env = self.env.clone();
         let cwd = self.cwd.clone();
+        let sandbox_root = self.sandbox_root.clone();
 
         let handle = std::thread::spawn(move || {
             let rt = match tokio::runtime::Builder::new_current_thread()
@@ -245,6 +250,7 @@ impl ChildProcess {
                 &args,
                 &env,
                 &cwd,
+                sandbox_root.as_deref(),
             ));
             if let Err(ref e) = result {
                 eprintln!("[child] error: {e}");
@@ -264,6 +270,7 @@ async fn run_child_component(
     args: &[String],
     _env: &[(String, String)],
     _cwd: &str,
+    sandbox_root: Option<&std::path::Path>,
 ) -> Result<ChildResult, String> {
     let stdout_pipe = MemoryOutputPipe::new(1024 * 1024); // 1MB
     let stderr_pipe = MemoryOutputPipe::new(1024 * 1024);
@@ -285,14 +292,22 @@ async fn run_child_component(
         builder.allow_ip_name_lookup(true);
         builder.env("SSL_CERT_FILE", "/etc/ssl/certs/ca-certificates.crt");
 
-        // Mount a sandbox root with symlink-free copies of system files
-        // (resolv.conf, TLS certs, gh config). Falls back to real /.
-        // Multiple preopens cause handle issues with wasip3, so use one.
-        let sandbox_root = std::path::Path::new("/tmp/gh-root");
-        let root = if sandbox_root.exists() {
-            sandbox_root
-        } else {
-            std::path::Path::new("/")
+        // Mount a sandbox root at `/`. A configured root typically holds
+        // symlink-free copies of system files (resolv.conf, TLS certs, command
+        // config). When unset — or set to a path that doesn't exist — fall back
+        // to the host's real `/`. Multiple preopens cause handle issues with
+        // wasip3, so we mount exactly one.
+        let real_root = std::path::Path::new("/");
+        let root = match sandbox_root {
+            Some(p) if p.exists() => p,
+            Some(p) => {
+                eprintln!(
+                    "[conch] sandbox root {} does not exist; mounting real / instead",
+                    p.display()
+                );
+                real_root
+            }
+            None => real_root,
         };
         let _ = builder.preopened_dir(
             root,
