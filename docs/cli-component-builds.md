@@ -6,9 +6,10 @@ register and run. Implements ADR #26 and issue #51.
 ## TL;DR
 
 ```sh
-mise run list-clis           # show available manifests
-mise run check-clis          # validate all manifests without building
-mise run build-cli -- gh     # build clis/gh.toml → scratch/gh-component/component.wasm
+mise run list-clis            # show available manifests
+mise run check-clis           # validate all manifests without building
+mise run build-cli -- gh      # build clis/gh.toml → scratch/gh-component/component.wasm
+mise run demo-sqlite          # build sqlite3 (C lane) + run a query through conch
 ```
 
 Each CLI is described by a manifest in `clis/<name>.toml`. The `conch-build`
@@ -21,11 +22,40 @@ bespoke script.
 | Lane | `lang` | Toolchain | Target | Status |
 |------|--------|-----------|--------|--------|
 | Rust | `rust` | cargo (mise-pinned) | wasip2 | stub — needs a spike (#51) |
-| C/C++ | `c` | wasi-sdk `wasm32-wasip2-clang` | wasip2 | stub — #52 (jq), #79 (curl) |
+| C/C++ | `c` | wasi-sdk `wasm32-wasip2` clang | wasip2 | implemented (sqlite3, #52); curl next (#79) |
 | Go | `go` | wasip3 Go fork + wasm-tools | wasip3 | implemented (gh, gcx) |
 
-The Rust/C lanes currently `bail!` with a pointer to their tracking issue; the
-structure is in place so wiring them up is a focused change.
+The Rust lane currently `bail!`s with a pointer to its tracking issue; the
+structure is in place so wiring it up is a focused change.
+
+### C lane (wasi-sdk → wasip2)
+
+`mise run demo-sqlite` builds the `sqlite3` CLI from the amalgamation and runs a
+query through conch. The lane is a **single `clang` invocation**: wasi-sdk's
+`wasm32-wasip2` target links via `wasm-component-ld`, so clang emits a
+**component directly** (imports `wasi:*@0.2.x`, exports `wasi:cli/run`) — no
+`wasm-tools component new` step, unlike the Go lane.
+
+The SDK is installed on demand by `mise run ensure-wasi-sdk` and kept **out of
+`[tools]`/PATH** — a wasm clang on PATH makes host proc-macro builds pick the
+wrong compiler (eryx's hard-won note). Build tasks export `WASI_SDK_PATH`; the
+lane reads it from the environment.
+
+Per-tool build config lives in the manifest's `[build]` table: `sources` (the C
+files), `cflags` (defines/opt/feature toggles), `link_flags` (e.g. emulation
+libs). See `clis/sqlite3.toml` for a worked example of the WASI workarounds a
+real C CLI needs.
+
+**sqlite3 spike findings (#52):** compiles clean once you (a) link the wasi-sdk
+emulation libs for `signal`/`getpid`, (b) define `__minux` to drop the
+`getrusage`-based `.timer` (WASI has no `getrusage`), and (c) set
+`SQLITE_NOHAVE_SYSTEM`/`SQLITE_THREADSAFE=0`/`OMIT_LOAD_EXTENSION` to avoid
+`system()`, pthreads, and `dlopen`. Verified end-to-end through conch:
+in-memory queries, SQL via stdin, pipelines (`sqlite3 … | upper`), **and
+file-backed databases** — the unix VFS's `fcntl` locking works over the WASI
+filesystem, so the "watch for locking" risk did not bite. (jq, the original
+candidate, was dropped: the shell already embeds jaq, so a jq component is
+redundant; sqlite is non-redundant and an easier amalgamation build.)
 
 ## Manifest format
 
@@ -33,8 +63,12 @@ See `clis/gh.toml` and `clis/gcx.toml`. Fields:
 
 - `name`, `description`, `lang` (`rust|c|go`)
 - `[source]` `repo`, `ref` (pinned tag/commit), `dir` (local working copy)
-- `[build]` `package` (what to build), `vendor_patch` (script run after vendoring)
-- `[component]` `world` (wasm-tools embed world, e.g. `command`)
+- `[build]`
+  - Go lane: `package` (what to build), `vendor_patch` (script run after vendoring)
+  - C lane: `sources` (C files), `cflags`, `link_flags` (and `vendor_patch` runs
+    before compiling); see `clis/sqlite3.toml`
+- `[component]` `world` (Go lane's wasm-tools embed world, e.g. `command`;
+  optional, defaults to `command` — the C lane ignores it)
 - `[cwasm]` `enabled`, `flags` (extra `wasmtime compile` flags)
 - `[output]` `dir`
 
@@ -53,6 +87,9 @@ See `clis/gh.toml` and `clis/gcx.toml`. Fields:
 
 The driver uses tools from `PATH` (mise provides them) plus the Go fork:
 
+- **wasi-sdk** (C lane) — pinned via `[vars] wasi_sdk_version` in `mise.toml`,
+  installed on demand by `mise run ensure-wasi-sdk`. Kept **off** `[tools]`/PATH
+  on purpose (a wasm clang on PATH breaks host proc-macro builds).
 - **wasm-tools** — pinned in `mise.toml`. Must be **≥ 1.245.1**: older releases
   (e.g. 1.236.1) fail `component new` on the async `wasi:cli/run` world with
   "no export `run` found".

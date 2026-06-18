@@ -1,0 +1,87 @@
+name: sqlite demo (C lane)
+
+# Builds the `sqlite3` CLI as a wasip2 component via the C lane (wasi-sdk's
+# wasm32-wasip2 clang) and runs it through conch end-to-end, asserting a query
+# returns the expected version. This is the reproducible-in-CI proof for the C
+# lane (issue #52).
+#
+# Light (~2-4 min warm): one clang invocation, no Go toolchain. The wasi-sdk
+# install is cached keyed on mise.toml.
+
+on:
+  workflow_dispatch: {}
+  pull_request:
+    branches: [main]
+    paths:
+      - "clis/sqlite3.toml"
+      - "crates/conch-build/**"
+      - "crates/conch/**"
+      - "crates/conch-cli/**"
+      - "crates/conch-shell/**"
+      - "mise.toml"
+      - ".github/workflows/sqlite-demo.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  sqlite-demo:
+    name: Build sqlite3 & run in conch
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Configure Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      # Cache the wasi-sdk install (kept off [tools], so mise-action won't fetch
+      # it). Keyed on mise.toml, which carries the pinned wasi_sdk_version.
+      - name: Cache wasi-sdk
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/mise/installs/github-web-assembly-wasi-sdk
+          key: wasi-sdk-${{ hashFiles('mise.toml') }}
+
+      # Lightweight toolchain setup (rust + wasm-tools + wasmtime from mise).
+      # Avoids the shared setup-rust action: this job doesn't run tests, and that
+      # action's cargo-binstall of nextest flakes on GitHub API rate limits.
+      - name: Install mise toolchains
+        uses: jdx/mise-action@v3
+        with:
+          cache: false
+
+      - name: Add wasm32-wasip2 target
+        run: rustup target add wasm32-wasip2
+
+      - name: Install wasi-sdk (C lane)
+        run: mise run ensure-wasi-sdk
+
+      - name: Fetch the SQLite amalgamation (pinned)
+        run: mise run fetch-sqlite
+
+      - name: Build the embedded shell (wasm + cwasm)
+        run: mise run compile-shell-cwasm
+
+      - name: Build the sqlite3 component
+        run: mise run build-cli -- sqlite3
+
+      - name: Run sqlite3 through conch
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/conch-cmds
+          cp scratch/sqlite-component/component.wasm /tmp/conch-cmds/sqlite3.wasm
+          out="$(cargo run -q -p conch-cli -- --commands-dir /tmp/conch-cmds \
+            -c 'sqlite3 :memory: "SELECT sqlite_version()"')"
+          echo "--- sqlite3 output ---"
+          echo "$out"
+          echo "$out" | grep -q '3.53.2' || {
+            echo "::error::sqlite3 did not run as expected through conch"
+            exit 1
+          }
+          echo "sqlite3 ran successfully in conch ✅"
