@@ -1,0 +1,101 @@
+name: curl demo (C lane, CMake)
+
+# Builds curl as a wasip2 component via the C lane's CMake build system
+# (wasi-sdk's wasm32-wasip2 clang) and runs it through conch end-to-end:
+#   - M1: `curl --version` (no network)
+#   - M2: `curl -sSI http://example.com` (plaintext HTTP — DNS + TCP via the
+#         host's wasi:sockets)
+# This is the reproducible-in-CI proof for issue #79 (plaintext HTTP). TLS/HTTPS
+# (M3) is follow-up work.
+#
+# The wasi-sdk install is cached keyed on mise.toml.
+
+on:
+  workflow_dispatch: {}
+  pull_request:
+    branches: [main]
+    paths:
+      - "clis/curl.toml"
+      - "clis/patches/patch-curl.sh"
+      - "crates/conch-build/**"
+      - "crates/conch/**"
+      - "crates/conch-cli/**"
+      - "crates/conch-shell/**"
+      - "mise.toml"
+      - ".github/workflows/curl-demo.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  curl-demo:
+    name: Build curl & run in conch
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Configure Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      # Cache the wasi-sdk install (kept off [tools], so mise-action won't fetch
+      # it). Keyed on mise.toml, which carries the pinned wasi_sdk_version.
+      - name: Cache wasi-sdk
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/mise/installs/github-web-assembly-wasi-sdk
+          key: wasi-sdk-${{ hashFiles('mise.toml') }}
+
+      # Lightweight toolchain setup (rust + wasm-tools + wasmtime from mise).
+      - name: Install mise toolchains
+        uses: jdx/mise-action@v3
+        with:
+          cache: false
+
+      - name: Add wasm32-wasip2 target
+        run: rustup target add wasm32-wasip2
+
+      # The CMake C lane drives the build with Ninja (cmake is preinstalled on
+      # the runner; ninja is not).
+      - name: Install Ninja
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+
+      - name: Install wasi-sdk (C lane)
+        run: mise run ensure-wasi-sdk
+
+      - name: Clone curl source (pinned)
+        run: mise run fetch-curl
+
+      - name: Build the embedded shell (wasm + cwasm)
+        run: mise run compile-shell-cwasm
+
+      - name: Build the curl component
+        run: mise run build-cli -- curl
+
+      - name: Run curl through conch
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/conch-cmds
+          cp scratch/curl-component/component.wasm /tmp/conch-cmds/curl.wasm
+
+          echo "--- M1: curl --version ---"
+          ver="$(cargo run -q -p conch-cli -- --commands-dir /tmp/conch-cmds -c 'curl --version')"
+          echo "$ver"
+          echo "$ver" | grep -q 'curl 8.20.0' || {
+            echo "::error::curl --version did not run as expected through conch"
+            exit 1
+          }
+
+          echo "--- M2: curl -sSI http://example.com ---"
+          hdrs="$(cargo run -q -p conch-cli -- --commands-dir /tmp/conch-cmds -c 'curl -sSI http://example.com')"
+          echo "$hdrs"
+          echo "$hdrs" | grep -qiE '^HTTP/.* 200' || {
+            echo "::error::curl plaintext HTTP did not return 200 through conch"
+            exit 1
+          }
+          echo "curl ran successfully in conch (M1 + M2) ✅"

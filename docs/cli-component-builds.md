@@ -9,7 +9,8 @@ register and run. Implements ADR #26 and issue #51.
 mise run list-clis            # show available manifests
 mise run check-clis           # validate all manifests without building
 mise run build-cli -- gh      # build clis/gh.toml → scratch/gh-component/component.wasm
-mise run demo-sqlite          # build sqlite3 (C lane) + run a query through conch
+mise run demo-sqlite          # build sqlite3 (C lane, single) + run a query through conch
+mise run demo-curl            # build curl (C lane, cmake) + fetch http:// through conch
 ```
 
 Each CLI is described by a manifest in `clis/<name>.toml`. The `conch-build`
@@ -22,7 +23,7 @@ bespoke script.
 | Lane | `lang` | Toolchain | Target | Status |
 |------|--------|-----------|--------|--------|
 | Rust | `rust` | cargo (mise-pinned) | wasip2 | stub — needs a spike (#51) |
-| C/C++ | `c` | wasi-sdk `wasm32-wasip2` clang | wasip2 | implemented (sqlite3, #52); curl next (#79) |
+| C/C++ | `c` | wasi-sdk `wasm32-wasip2` clang | wasip2 | implemented (sqlite3 #52; curl plaintext HTTP #79) |
 | Go | `go` | wasip3 Go fork + wasm-tools | wasip3 | implemented (gh, gcx) |
 
 The Rust lane currently `bail!`s with a pointer to its tracking issue; the
@@ -41,10 +42,18 @@ The SDK is installed on demand by `mise run ensure-wasi-sdk` and kept **out of
 wrong compiler (eryx's hard-won note). Build tasks export `WASI_SDK_PATH`; the
 lane reads it from the environment.
 
-Per-tool build config lives in the manifest's `[build]` table: `sources` (the C
-files), `cflags` (defines/opt/feature toggles), `link_flags` (e.g. emulation
-libs). See `clis/sqlite3.toml` for a worked example of the WASI workarounds a
-real C CLI needs.
+The C lane has two build systems, set by `[build] system`:
+
+- **`single`** (default) — one `clang` call over `[build] sources`
+  (amalgamation-style, e.g. sqlite3). Config: `sources`, `cflags`, `link_flags`.
+- **`cmake`** — configure + build a CMake project with the wasi-sdk wasip2
+  toolchain file, then copy `[build] artifact` (a build-dir-relative path) to
+  `component.wasm`. Config adds `cmake_flags`; `cflags`/`link_flags` are passed
+  via `CMAKE_C_FLAGS`/`CMAKE_EXE_LINKER_FLAGS`. Used by curl. `cmake` + `ninja`
+  must be on PATH (the wasi clang still comes from the toolchain file).
+
+See `clis/sqlite3.toml` (single) and `clis/curl.toml` (cmake) for worked
+examples of the WASI workarounds a real C CLI needs.
 
 **sqlite3 spike findings (#52):** compiles clean once you (a) link the wasi-sdk
 emulation libs for `signal`/`getpid`, (b) define `__minux` to drop the
@@ -57,6 +66,26 @@ filesystem, so the "watch for locking" risk did not bite. (jq, the original
 candidate, was dropped: the shell already embeds jaq, so a jq component is
 redundant; sqlite is non-redundant and an easier amalgamation build.)
 
+**curl spike findings (#79):** `mise run demo-curl` builds curl (CMake, SSL +
+all optional deps off) and runs `curl --version` and `curl -sSI http://…`
+through conch. **Plaintext HTTP works end-to-end** — DNS + TCP connect are
+served by the host's `wasi:sockets` (the conch child gets `inherit_network` +
+`allow_ip_name_lookup`). The build needs, in `clis/curl.toml`:
+- `-DPOLLPRI=0` (WASI `poll.h` lacks the OOB-poll flag),
+- `-D_WASI_EMULATED_SIGNAL` + `-lwasi-emulated-signal`,
+- `-mllvm -wasm-enable-sjlj` so `setjmp.h` compiles (the alarm-based DNS-timeout
+  path includes it unconditionally; it is never actually exercised),
+- `-DCURL_DISABLE_SOCKETPAIR` — WASI has no `socketpair`, and curl's TCP-based
+  fallback can't run, so the multi-handle wakeup must be disabled, and
+- a one-line `vendor_patch` disabling `getsockname` in `set_local_ip()`:
+  wasi-libc's `getsockname` **`abort()`s** on an unmappable host error instead
+  of returning -1, which would otherwise crash every transfer. The local-IP
+  info it gathers is non-essential.
+
+**TLS/HTTPS (M3) is not done yet** — the host exposes raw TCP (`wasi:sockets`),
+not `wasi:http`, so TLS must be linked into the guest (a wasi-buildable
+mbedTLS/wolfSSL). That's the next step for #79.
+
 ## Manifest format
 
 See `clis/gh.toml` and `clis/gcx.toml`. Fields:
@@ -65,8 +94,9 @@ See `clis/gh.toml` and `clis/gcx.toml`. Fields:
 - `[source]` `repo`, `ref` (pinned tag/commit), `dir` (local working copy)
 - `[build]`
   - Go lane: `package` (what to build), `vendor_patch` (script run after vendoring)
-  - C lane: `sources` (C files), `cflags`, `link_flags` (and `vendor_patch` runs
-    before compiling); see `clis/sqlite3.toml`
+  - C lane: `system` (`single`|`cmake`); `single` uses `sources`/`cflags`/
+    `link_flags`; `cmake` uses `cmake_flags` + `artifact`. `vendor_patch` runs
+    before compiling. See `clis/sqlite3.toml` and `clis/curl.toml`
 - `[component]` `world` (Go lane's wasm-tools embed world, e.g. `command`;
   optional, defaults to `command` — the C lane ignores it)
 - `[cwasm]` `enabled`, `flags` (extra `wasmtime compile` flags)

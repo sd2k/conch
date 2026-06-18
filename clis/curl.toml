@@ -1,0 +1,61 @@
+# Build manifest for curl as a WASI (wasip2) component, via the C lane's CMake
+# build system. Consumed by the `conch-build` driver:
+#   mise run build-cli -- curl     (or end-to-end: mise run demo-curl)
+# See ADR #26 and issue #79.
+#
+# Status: plaintext HTTP works end-to-end through conch (M2). TLS/HTTPS (M3) is
+# follow-up work — it needs a wasi-buildable TLS backend (mbedTLS/wolfSSL), so
+# this build has SSL disabled. See docs/cli-component-builds.md.
+
+name = "curl"
+description = "curl (C, CMake; plaintext HTTP — no TLS yet, #79)"
+lang = "c"
+
+[source]
+repo = "https://github.com/curl/curl.git"
+ref = "curl-8_20_0"
+# Local working copy the driver builds from. `mise run fetch-curl` clones it.
+dir = "scratch/curl"
+
+[build]
+system = "cmake"
+# Built tool, relative to the CMake build dir → copied to component.wasm.
+artifact = "src/curl"
+# Patch wasi-libc gaps in the source before configuring (see the script).
+vendor_patch = "clis/patches/patch-curl.sh"
+# Compiler flags (passed via CMAKE_C_FLAGS). Each works around a WASI gap:
+cflags = [
+    "-DPOLLPRI=0",             # WASI poll.h lacks POLLPRI (OOB data); unused, stub to 0
+    "-D_WASI_EMULATED_SIGNAL", # signal() via the wasi-sdk emulation lib
+    "-mllvm", "-wasm-enable-sjlj", # setjmp.h needs LLVM sjlj lowering to compile
+    "-DCURL_DISABLE_SOCKETPAIR",   # no socketpair on WASI → disable multi wakeup
+]
+# Linker flags (passed via CMAKE_EXE_LINKER_FLAGS).
+link_flags = ["-lwasi-emulated-signal", "-Wl,-z,stack-size=8388608"]
+# CMake configure flags: build the static curl exe with SSL and every optional
+# dependency turned off (minimal, portable, no TLS yet).
+cmake_flags = [
+    "-DCMAKE_BUILD_TYPE=Release",
+    "-DBUILD_SHARED_LIBS=OFF",
+    "-DBUILD_CURL_EXE=ON",
+    "-DBUILD_LIBCURL_DOCS=OFF",
+    "-DENABLE_CURL_MANUAL=OFF",
+    "-DCURL_ENABLE_SSL=OFF",
+    "-DCURL_ZLIB=OFF",
+    "-DCURL_BROTLI=OFF",
+    "-DCURL_ZSTD=OFF",
+    "-DCURL_USE_LIBPSL=OFF",
+    "-DCURL_USE_LIBSSH2=OFF",
+    "-DUSE_NGHTTP2=OFF",
+    "-DUSE_LIBIDN2=OFF",
+    "-DCURL_USE_GSSAPI=OFF",
+    "-DCURL_USE_LIBUV=OFF",
+    "-DCURL_DISABLE_INSTALL=ON",
+    "-DENABLE_THREADED_RESOLVER=OFF",
+]
+
+[cwasm]
+enabled = false
+
+[output]
+dir = "scratch/curl-component"
