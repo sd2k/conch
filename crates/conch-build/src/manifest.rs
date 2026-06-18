@@ -24,7 +24,8 @@ pub struct Manifest {
     pub source: Source,
     /// Build configuration.
     pub build: Build,
-    /// Component-model settings.
+    /// Component-model settings (Go lane only; defaults for other lanes).
+    #[serde(default)]
     pub component: Component,
     /// Optional cwasm pre-compilation.
     #[serde(default)]
@@ -61,12 +62,26 @@ pub struct Source {
 #[derive(Debug, Deserialize)]
 pub struct Build {
     /// Package/path to build, relative to the source dir (lane-specific meaning).
+    /// Used by the Go lane (`go build <package>`).
     #[serde(default = "default_package")]
     pub package: String,
     /// Optional script (repo-root-relative) applied after dependency vendoring
-    /// to stub out code that doesn't compile for the wasm target.
+    /// (Go lane) or before compilation (C lane) to stub out code that doesn't
+    /// compile for the wasm target.
     #[serde(default)]
     pub vendor_patch: Option<PathBuf>,
+    /// C lane: source files to compile, relative to the source dir
+    /// (e.g. the SQLite amalgamation's `shell.c`, `sqlite3.c`).
+    #[serde(default)]
+    pub sources: Vec<PathBuf>,
+    /// C lane: compiler flags — defines, optimization, feature toggles
+    /// (e.g. `-O2`, `-DSQLITE_THREADSAFE=0`).
+    #[serde(default)]
+    pub cflags: Vec<String>,
+    /// C lane: linker flags (e.g. wasi-sdk emulation libs like
+    /// `-lwasi-emulated-signal`).
+    #[serde(default)]
+    pub link_flags: Vec<String>,
 }
 
 fn default_package() -> String {
@@ -74,10 +89,27 @@ fn default_package() -> String {
 }
 
 /// Component-model embedding settings.
+///
+/// Used by the Go lane (its `wasm-tools component embed` step). The C lane emits
+/// a component directly from clang, so it ignores this; the table is optional
+/// and defaults to `world = "command"` for schema uniformity.
 #[derive(Debug, Deserialize)]
 pub struct Component {
     /// `wasm-tools component embed` world (e.g. `command`).
+    #[serde(default = "default_world")]
     pub world: String,
+}
+
+fn default_world() -> String {
+    "command".to_string()
+}
+
+impl Default for Component {
+    fn default() -> Self {
+        Self {
+            world: default_world(),
+        }
+    }
 }
 
 /// Optional cwasm (pre-compiled) output settings.
@@ -106,5 +138,66 @@ impl Manifest {
         let manifest: Manifest = toml::from_str(&text)
             .with_context(|| format!("parsing manifest {}", path.display()))?;
         Ok(manifest)
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    /// A C-lane manifest parses its `[build]` C fields and may omit
+    /// `[component]` entirely (it defaults to `world = "command"`).
+    #[test]
+    fn parses_c_lane_manifest() {
+        let toml = r#"
+            name = "sqlite3"
+            lang = "c"
+            [source]
+            repo = "https://example.com/sqlite.zip"
+            ref = "3.53.2"
+            dir = "scratch/sqlite"
+            [build]
+            sources = ["shell.c", "sqlite3.c"]
+            cflags = ["-O2", "-DSQLITE_THREADSAFE=0"]
+            link_flags = ["-lwasi-emulated-signal"]
+            [output]
+            dir = "scratch/sqlite-component"
+        "#;
+        let m: Manifest = toml::from_str(toml).expect("C manifest should parse");
+        assert_eq!(m.lang, Lang::C);
+        assert_eq!(
+            m.build.sources,
+            vec![PathBuf::from("shell.c"), PathBuf::from("sqlite3.c")]
+        );
+        assert_eq!(m.build.cflags, ["-O2", "-DSQLITE_THREADSAFE=0"]);
+        assert_eq!(m.build.link_flags, ["-lwasi-emulated-signal"]);
+        // No [component] table → defaulted.
+        assert_eq!(m.component.world, "command");
+    }
+
+    /// A Go-lane manifest still parses, and its C-only `[build]` fields default
+    /// to empty (so the schema change is backward-compatible).
+    #[test]
+    fn go_lane_manifest_leaves_c_fields_empty() {
+        let toml = r#"
+            name = "gh"
+            lang = "go"
+            [source]
+            repo = "https://github.com/cli/cli.git"
+            ref = "v2.87.3"
+            dir = "scratch/gh-cli"
+            [build]
+            package = "./cmd/gh"
+            [component]
+            world = "command"
+            [output]
+            dir = "scratch/gh-component"
+        "#;
+        let m: Manifest = toml::from_str(toml).expect("Go manifest should parse");
+        assert_eq!(m.lang, Lang::Go);
+        assert_eq!(m.build.package, "./cmd/gh");
+        assert!(m.build.sources.is_empty());
+        assert!(m.build.cflags.is_empty());
     }
 }

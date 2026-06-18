@@ -7,11 +7,11 @@
 //!   (default `scratch/go-wasip3`). The WIT dir is derived from it.
 //! - `wasm-tools` and `wasmtime` are taken from `PATH` (mise provides them).
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 
-use super::run;
+use super::{compile_cwasm, path_str, run};
 use crate::manifest::Manifest;
 
 /// Default location of the wasip3 Go fork, relative to the repo root.
@@ -125,24 +125,8 @@ pub fn build(manifest: &Manifest) -> Result<()> {
     )?;
     std::fs::remove_file(&embedded).ok();
 
-    if manifest.cwasm.enabled {
-        eprintln!("=== [{}] Step 5: pre-compile to cwasm ===", manifest.name);
-        let cwasm = output_dir.join(format!("{}.cwasm", manifest.name));
-        let cwasm_s = path_str(&cwasm)?;
-        let mut args: Vec<&str> = vec!["compile"];
-        args.extend(manifest.cwasm.flags.iter().map(String::as_str));
-        args.extend([component_s.as_str(), "-o", cwasm_s.as_str()]);
-        run("wasmtime", &args, &repo_root, &[])?;
-        eprintln!("  → {}", cwasm.display());
-    }
+    compile_cwasm(manifest, &component, &output_dir, &repo_root)?;
 
     eprintln!("=== [{}] done → {} ===", manifest.name, component.display());
     Ok(())
-}
-
-/// Convert a path to `&str`, erroring on non-UTF-8 (which our tools can't handle).
-fn path_str(p: &Path) -> Result<String> {
-    p.to_str()
-        .map(str::to_string)
-        .with_context(|| format!("path is not valid UTF-8: {}", p.display()))
 }

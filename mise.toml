@@ -22,6 +22,14 @@ version = "1.246.2"
 [tools."aqua:bytecodealliance/wasmtime"]
 version = "44.0.3"
 
+[vars]
+# wasi-sdk for the C build lane (sqlite3, #52; curl to follow in #79). Pinned
+# here but deliberately NOT in [tools]: a wasm clang on PATH makes host
+# proc-macro builds pick the wrong compiler. The `ensure-wasi-sdk` task installs
+# it on demand; build tasks export WASI_SDK_PATH so the conch-build C lane finds
+# it. (Matches eryx's pattern.)
+wasi_sdk_version = "wasi-sdk-27"
+
 # =============================================================================
 # Core development tasks
 # =============================================================================
@@ -180,8 +188,51 @@ description = "Build a CLI component from its manifest (clis/<name>.toml) via th
 run = """
 #!/usr/bin/env bash
 set -euo pipefail
-NAME="${1:?Usage: mise run build-cli -- <name|path.toml> (e.g. gh, gcx)}"
+NAME="${1:?Usage: mise run build-cli -- <name|path.toml> (e.g. gh, gcx, sqlite3)}"
+# The C lane needs wasi-sdk; export WASI_SDK_PATH if it's installed (kept off
+# PATH/[tools] on purpose). Don't force-install — Go-lane builds (gh) shouldn't
+# pay for it. C manifests bail with a pointer to `ensure-wasi-sdk` if missing.
+if SDK="$(mise where "github:WebAssembly/wasi-sdk@{{vars.wasi_sdk_version}}" 2>/dev/null)"; then
+    export WASI_SDK_PATH="$SDK"
+fi
 cargo run -q -p conch-build -- "$NAME"
+"""
+
+[tasks.ensure-wasi-sdk]
+description = "Install the pinned wasi-sdk (C build lane) if not already present"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+SPEC="github:WebAssembly/wasi-sdk@{{vars.wasi_sdk_version}}"
+if ! mise where "$SPEC" >/dev/null 2>&1; then
+    echo "Installing {{vars.wasi_sdk_version}}…"
+    mise install "$SPEC"
+fi
+SDK="$(mise where "$SPEC")"
+if [ ! -x "$SDK/bin/clang" ]; then
+    echo "ERROR: wasi-sdk install incomplete — $SDK/bin/clang not found" >&2
+    exit 1
+fi
+echo "wasi-sdk ready at: $SDK"
+"""
+
+[tasks.fetch-sqlite]
+description = "Fetch the pinned SQLite amalgamation source into scratch/sqlite"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+DIR=scratch/sqlite
+URL="https://www.sqlite.org/2026/sqlite-amalgamation-3530200.zip"
+if [ -f "$DIR/sqlite3.c" ]; then
+    echo "sqlite amalgamation already present ($(grep -m1 'define SQLITE_VERSION ' "$DIR/sqlite3.h" | awk '{print $3}'))"
+    exit 0
+fi
+mkdir -p "$DIR"
+echo "Fetching $URL"
+curl -sL -o "$DIR/amalg.zip" "$URL"
+unzip -o -j "$DIR/amalg.zip" -d "$DIR"
+rm -f "$DIR/amalg.zip"
+echo "Fetched $(grep -m1 'define SQLITE_VERSION ' "$DIR/sqlite3.h")"
 """
 
 [tasks.list-clis]
@@ -275,3 +326,19 @@ run = 'cargo run -p conch-cli -- --commands-dir /tmp/conch-cmds -c "echo hello w
 description = "Demo: gh pr list | upper (needs setup-gh-sandbox first)"
 depends = ["wasm-build", "compile-shell-cwasm", "setup-commands-dir", "setup-gh-sandbox"]
 run = 'cargo run -p conch-cli -- --commands-dir /tmp/conch-cmds --sandbox-root /tmp/gh-root -c "gh pr list -R cli/cli --limit 3 | upper"'
+
+[tasks.demo-sqlite]
+description = "Demo: build sqlite3 (C lane) and run a query through conch (#52)"
+depends = ["ensure-wasi-sdk", "fetch-sqlite", "wasm-build", "compile-shell-cwasm", "build-test-cmd"]
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+export WASI_SDK_PATH="$(mise where "github:WebAssembly/wasi-sdk@{{vars.wasi_sdk_version}}")"
+cargo run -q -p conch-build -- sqlite3
+mkdir -p /tmp/conch-cmds
+cp scratch/sqlite-component/component.wasm /tmp/conch-cmds/sqlite3.wasm
+cp target/wasm32-wasip2/release/conch-test-cmd.wasm /tmp/conch-cmds/upper.wasm
+echo "--- sqlite3 :memory: piped through upper ---"
+cargo run -q -p conch-cli -- --commands-dir /tmp/conch-cmds \
+    -c "sqlite3 :memory: \\"SELECT 'hello from sqlite ' || sqlite_version()\\" | upper"
+"""
