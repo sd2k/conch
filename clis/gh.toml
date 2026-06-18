@@ -1,0 +1,32 @@
+# Build manifest for the GitHub CLI (`gh`) as a WASI component.
+# Consumed by the `conch-build` driver: `mise run build-cli -- gh`.
+# See ADR #26 and issue #51.
+
+name = "gh"
+description = "GitHub CLI"
+lang = "go"
+
+[source]
+repo = "https://github.com/cli/cli.git"
+ref = "v2.87.3"
+# Local working copy the driver builds from. Until the pinned Go toolchain
+# image lands (#53), this is a manual checkout under the gitignored scratch/.
+dir = "scratch/gh-cli"
+
+[build]
+# Go package to build, relative to the source dir.
+package = "./cmd/gh"
+# Script applied after `go mod vendor` to stub out wasip3-incompatible code.
+vendor_patch = "clis/patches/patch-gh-vendor.sh"
+
+[component]
+# wasm-tools component world to embed.
+world = "command"
+
+[cwasm]
+# `gh` is loaded as a plain component; conch compiles it per-engine on demand.
+enabled = false
+
+[output]
+# Where the built component (and optional cwasm) is written.
+dir = "scratch/gh-component"

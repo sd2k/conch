@@ -1,0 +1,33 @@
+# Build manifest for the Grafana Cloud CLI (`gcx`) as a WASI component.
+# Consumed by the `conch-build` driver: `mise run build-cli -- gcx`.
+# See ADR #26 and issue #51.
+
+name = "gcx"
+description = "Grafana Cloud CLI"
+lang = "go"
+
+[source]
+repo = "git@github.com:grafana/grafana-cloud-cli.git"
+ref = "b3246215f9f66a6ed27fb83af1298c9ec7880e0b"
+dir = "scratch/grafana-cloud-cli"
+
+[build]
+# gcx's main package is the module root.
+package = "."
+vendor_patch = "clis/patches/patch-gcx-vendor.sh"
+
+[component]
+world = "command"
+
+[cwasm]
+# gcx is pre-compiled to cwasm with the async/stackful flags it needs at runtime.
+enabled = true
+flags = [
+    "-W", "component-model-async",
+    "-W", "component-model-async-builtins",
+    "-W", "component-model-async-stackful",
+    "-W", "max-wasm-stack=8388608",
+]
+
+[output]
+dir = "scratch/gcx-component"
