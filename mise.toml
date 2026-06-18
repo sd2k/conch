@@ -216,6 +216,21 @@ fi
 echo "wasi-sdk ready at: $SDK"
 """
 
+[tasks.fetch-ripgrep]
+description = "Clone the pinned ripgrep source into scratch/ripgrep"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+DIR=scratch/ripgrep
+REF=15.1.0
+if [ -d "$DIR/.git" ]; then
+    echo "ripgrep source already present ($(git -C "$DIR" describe --tags 2>/dev/null || echo unknown))"
+    exit 0
+fi
+echo "Cloning ripgrep @ $REF"
+git clone --depth 1 --branch "$REF" https://github.com/BurntSushi/ripgrep.git "$DIR"
+"""
+
 [tasks.fetch-curl]
 description = "Clone the pinned curl source into scratch/curl"
 run = """
@@ -356,6 +371,26 @@ cp target/wasm32-wasip2/release/conch-test-cmd.wasm /tmp/conch-cmds/upper.wasm
 echo "--- sqlite3 :memory: piped through upper ---"
 cargo run -q -p conch-cli -- --commands-dir /tmp/conch-cmds \
     -c "sqlite3 :memory: \\"SELECT 'hello from sqlite ' || sqlite_version()\\" | upper"
+"""
+
+[tasks.demo-ripgrep]
+description = "Demo: build ripgrep (Rust lane) and search a mounted dir through conch (#85)"
+depends = ["wasm-target", "fetch-ripgrep", "wasm-build", "compile-shell-cwasm", "build-test-cmd"]
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+cargo run -q -p conch-build -- rg
+mkdir -p /tmp/conch-cmds /tmp/rg-root/proj
+cp scratch/ripgrep-component/component.wasm /tmp/conch-cmds/rg.wasm
+cp target/wasm32-wasip2/release/conch-test-cmd.wasm /tmp/conch-cmds/upper.wasm
+printf 'fn main() {\\n    println!("hi");\\n}\\n' > /tmp/rg-root/proj/a.rs
+printf 'TODO: ship it\\n' > /tmp/rg-root/proj/b.txt
+echo "--- rg -n main /proj ---"
+cargo run -q -p conch-cli -- --commands-dir /tmp/conch-cmds --sandbox-root /tmp/rg-root \
+    -c "rg -n main /proj"
+echo "--- rg -n TODO /proj | upper ---"
+cargo run -q -p conch-cli -- --commands-dir /tmp/conch-cmds --sandbox-root /tmp/rg-root \
+    -c "rg -n TODO /proj | upper"
 """
 
 [tasks.demo-curl]

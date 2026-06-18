@@ -1,0 +1,80 @@
+name: ripgrep demo (Rust lane)
+
+# Builds ripgrep (`rg`) as a wasip2 component via the Rust lane
+# (cargo --target wasm32-wasip2) and runs it through conch end-to-end:
+#   - M1: `rg --version`
+#   - M2: `rg` search over a mounted sandbox dir
+# Reproducible-in-CI proof for the Rust lane (issue #85, epic #84).
+
+on:
+  workflow_dispatch: {}
+  pull_request:
+    branches: [main]
+    paths:
+      - "clis/rg.toml"
+      - "crates/conch-build/**"
+      - "crates/conch/**"
+      - "crates/conch-cli/**"
+      - "crates/conch-shell/**"
+      - "mise.toml"
+      - ".github/workflows/ripgrep-demo.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  ripgrep-demo:
+    name: Build ripgrep & run in conch
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Configure Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install mise toolchains
+        uses: jdx/mise-action@v3
+        with:
+          cache: false
+
+      - name: Add wasm32-wasip2 target
+        run: rustup target add wasm32-wasip2
+
+      - name: Clone ripgrep source (pinned)
+        run: mise run fetch-ripgrep
+
+      - name: Build the embedded shell (wasm + cwasm)
+        run: mise run compile-shell-cwasm
+
+      - name: Build the ripgrep component
+        run: mise run build-cli -- rg
+
+      - name: Run ripgrep through conch
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/conch-cmds /tmp/rg-root/proj
+          cp scratch/ripgrep-component/component.wasm /tmp/conch-cmds/rg.wasm
+          printf 'fn main() {\n    println!("hi");\n}\n' > /tmp/rg-root/proj/a.rs
+
+          echo "--- M1: rg --version ---"
+          ver="$(cargo run -q -p conch-cli -- --commands-dir /tmp/conch-cmds -c 'rg --version')"
+          echo "$ver"
+          echo "$ver" | grep -q 'ripgrep 15.1.0' || {
+            echo "::error::rg --version did not run as expected through conch"
+            exit 1
+          }
+
+          echo "--- M2: rg -n main /proj ---"
+          out="$(cargo run -q -p conch-cli -- --commands-dir /tmp/conch-cmds --sandbox-root /tmp/rg-root -c 'rg -n main /proj')"
+          echo "$out"
+          echo "$out" | grep -q 'a.rs:1:fn main' || {
+            echo "::error::rg search did not return the expected match through conch"
+            exit 1
+          }
+          echo "ripgrep ran successfully in conch (M1 + M2) ✅"
