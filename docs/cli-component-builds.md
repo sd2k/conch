@@ -11,6 +11,7 @@ mise run check-clis           # validate all manifests without building
 mise run build-cli -- gh      # build clis/gh.toml → scratch/gh-component/component.wasm
 mise run demo-sqlite          # build sqlite3 (C lane, single) + run a query through conch
 mise run demo-curl            # build curl (C lane, cmake) + fetch http:// through conch
+mise run demo-ripgrep         # build rg (Rust lane) + search a mounted dir through conch
 ```
 
 Each CLI is described by a manifest in `clis/<name>.toml`. The `conch-build`
@@ -22,12 +23,27 @@ bespoke script.
 
 | Lane | `lang` | Toolchain | Target | Status |
 |------|--------|-----------|--------|--------|
-| Rust | `rust` | cargo (mise-pinned) | wasip2 | stub — needs a spike (#51) |
+| Rust | `rust` | cargo (mise-pinned) | wasip2 | implemented (ripgrep, #85) |
 | C/C++ | `c` | wasi-sdk `wasm32-wasip2` clang | wasip2 | implemented (sqlite3 #52; curl plaintext HTTP #79) |
 | Go | `go` | wasip3 Go fork + wasm-tools | wasip3 | implemented (gh, gcx) |
 
-The Rust lane currently `bail!`s with a pointer to its tracking issue; the
-structure is in place so wiring it up is a focused change.
+### Rust lane (cargo → wasip2)
+
+`mise run demo-ripgrep` builds `rg` and runs a search through conch. The simplest
+lane: since Rust 1.82 the `wasm32-wasip2` target **emits a component directly**,
+so the lane is just `cargo build --release --target wasm32-wasip2 --bin <bin>`,
+then the artifact `target/wasm32-wasip2/release/<bin>.wasm` is the component — no
+`wasm-tools` step, no wasi-sdk. Config: `[build] bin` (required) and optional
+`cargo_flags`. The `wasm32-wasip2` rustup target must be installed (the mise
+`wasm-target` task); cargo comes from PATH.
+
+**ripgrep spike findings (#85):** builds and runs clean with **no source patches
+and no special flags** — the cleanest candidate yet. The default build uses the
+pure-Rust regex engine (`features:-pcre2`), and ripgrep's mmap usage
+**auto-falls-back** on wasm, so `--no-mmap` isn't needed. Verified end-to-end
+through conch: `rg -n main /proj` finds matches in a mounted dir, and
+`rg … | upper` pipes. (`rg` is the most-used external command in real sessions —
+see epic #84.)
 
 ### C lane (wasi-sdk → wasip2)
 
@@ -93,6 +109,8 @@ See `clis/gh.toml` and `clis/gcx.toml`. Fields:
 - `name`, `description`, `lang` (`rust|c|go`)
 - `[source]` `repo`, `ref` (pinned tag/commit), `dir` (local working copy)
 - `[build]`
+  - Rust lane: `bin` (cargo binary; artifact is `<bin>.wasm`), optional
+    `cargo_flags`; see `clis/rg.toml`
   - Go lane: `package` (what to build), `vendor_patch` (script run after vendoring)
   - C lane: `system` (`single`|`cmake`); `single` uses `sources`/`cflags`/
     `link_flags`; `cmake` uses `cmake_flags` + `artifact`. `vendor_patch` runs

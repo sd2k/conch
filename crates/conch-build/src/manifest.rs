@@ -107,6 +107,14 @@ pub struct Build {
     /// (e.g. `src/curl`); copied to `<output>/component.wasm`.
     #[serde(default)]
     pub artifact: Option<PathBuf>,
+    /// Rust lane: cargo binary to build (`cargo build --bin <bin>`); the wasm
+    /// artifact is `<bin>.wasm`. Required for the Rust lane.
+    #[serde(default)]
+    pub bin: Option<String>,
+    /// Rust lane: extra `cargo build` flags (e.g. `--no-default-features`,
+    /// `--features foo`).
+    #[serde(default)]
+    pub cargo_flags: Vec<String>,
 }
 
 fn default_package() -> String {
@@ -231,6 +239,28 @@ mod tests {
         );
         // sources is unused in cmake mode and defaults empty.
         assert!(m.build.sources.is_empty());
+    }
+
+    /// A Rust-lane manifest (ripgrep-style) parses its `bin`/`cargo_flags`.
+    #[test]
+    fn parses_rust_lane_manifest() {
+        let toml = r#"
+            name = "rg"
+            lang = "rust"
+            [source]
+            repo = "https://github.com/BurntSushi/ripgrep.git"
+            ref = "15.1.0"
+            dir = "scratch/ripgrep"
+            [build]
+            bin = "rg"
+            cargo_flags = ["--no-default-features"]
+            [output]
+            dir = "scratch/ripgrep-component"
+        "#;
+        let m: Manifest = toml::from_str(toml).expect("Rust manifest should parse");
+        assert_eq!(m.lang, Lang::Rust);
+        assert_eq!(m.build.bin.as_deref(), Some("rg"));
+        assert_eq!(m.build.cargo_flags, ["--no-default-features"]);
     }
 
     /// A Go-lane manifest still parses, and its C-only `[build]` fields default

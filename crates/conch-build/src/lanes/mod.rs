@@ -2,8 +2,8 @@
 //!
 //! Each lane consumes a [`Manifest`] and emits a component into the manifest's
 //! output dir. The Go lane backs the `gh`/`gcx` builds; the C lane backs
-//! `sqlite3` (#52, with curl to follow in #79). The Rust lane is still a stub
-//! pending its compile spike.
+//! `sqlite3` (single) and `curl` (cmake); the Rust lane backs `rg` (ripgrep,
+//! #85).
 
 pub mod c;
 pub mod go;
