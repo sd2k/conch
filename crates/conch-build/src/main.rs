@@ -79,8 +79,12 @@ fn resolve_manifest_path(arg: &str) -> PathBuf {
 /// Collect the paths of all `*.toml` manifests in `clis/`, sorted.
 fn manifest_paths() -> Result<Vec<PathBuf>> {
     let dir = PathBuf::from(CLIS_DIR);
-    let entries = std::fs::read_dir(&dir)
-        .with_context(|| format!("reading manifest dir {}", dir.display()))?;
+    let entries = std::fs::read_dir(&dir).with_context(|| {
+        format!(
+            "reading manifest dir {} (run conch-build from the repo root)",
+            dir.display()
+        )
+    })?;
     let mut paths: Vec<PathBuf> = entries
         .filter_map(|e| e.ok())
         .map(|e| e.path())

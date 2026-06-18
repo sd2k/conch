@@ -73,7 +73,10 @@ impl ComponentRegistry {
     }
 
     /// Look up the WASM bytes for a command name.
-    pub fn get_bytes(&self, name: &str) -> Option<&RegistryEntry> {
+    ///
+    /// Crate-internal: returns [`RegistryEntry`], which is not part of the
+    /// public API (the host calls this when spawning a child component).
+    pub(crate) fn get_bytes(&self, name: &str) -> Option<&RegistryEntry> {
         self.entries.get(name)
     }
 
