@@ -7,6 +7,7 @@ register and run. Implements ADR #26 and issue #51.
 
 ```sh
 mise run list-clis           # show available manifests
+mise run check-clis          # validate all manifests without building
 mise run build-cli -- gh     # build clis/gh.toml → scratch/gh-component/component.wasm
 ```
 
@@ -36,6 +37,17 @@ See `clis/gh.toml` and `clis/gcx.toml`. Fields:
 - `[component]` `world` (wasm-tools embed world, e.g. `command`)
 - `[cwasm]` `enabled`, `flags` (extra `wasmtime compile` flags)
 - `[output]` `dir`
+
+## CI
+
+- **`CLI Manifests`** job (`ci.yml`) — runs `conch-build --check` on every PR
+  touching `clis/**` or `crates/conch-build/**`. Validates each manifest parses
+  and its `vendor_patch` exists. Toolchain-free, so it always runs.
+- **`Rebuild CLI components`** workflow (`rebuild-cli-components.yml`) — weekly +
+  manual `workflow_dispatch`. Validates manifests, then rebuilds the Go-lane
+  components to catch upstream/toolchain bit-rot (#29). The rebuild step is
+  currently guarded: it skips with a notice until the pinned wasip3 Go toolchain
+  image lands (#53), then it rebuilds gh/gcx for real and fails on breakage.
 
 ## Toolchains
 

@@ -37,6 +37,7 @@ jobs:
             rust:
               - 'crates/**'
               - 'tests/**'
+              - 'clis/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'rustfmt.toml'
@@ -179,6 +180,35 @@ jobs:
         # Only check conch core without embedded-shell feature
         # Other crates require embedded-shell which needs the WASM artifact
         run: cargo check -p conch --no-default-features
+
+  # Validate the CLI build manifests (clis/*.toml) parse and reference existing
+  # files. Cheap and toolchain-free (no wasm/Go fork), so it runs standalone and
+  # catches manifest bit-rot on every PR. The actual component rebuild lives in
+  # the scheduled rebuild-cli-components workflow (needs the Go toolchain, #53).
+  manifests:
+    name: CLI Manifests
+    runs-on: ubuntu-latest
+    needs: changes
+    if: >-
+      github.event_name == 'push'
+      || needs.changes.outputs.rust == 'true'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Configure Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install mise
+        uses: jdx/mise-action@v3
+        with:
+          mise_toml: |
+            [tools]
+            rust = "1.92"
+
+      - name: Validate manifests
+        run: cargo run -p conch-build -- --check
 
   doc:
     name: Documentation

@@ -1,0 +1,61 @@
+name: Rebuild CLI components
+
+# Rebuilds the in-repo CLI components (gh, gcx, …) from their manifests to catch
+# upstream/toolchain bit-rot early — the Go lane tracks an experimental wasip3
+# fork + wasm-tools that move (issue #29).
+#
+# Status: the manifest validation runs today. The actual Go-lane rebuild is
+# gated until the pinned wasip3 Go toolchain image lands (#53) — see the
+# "Rebuild Go-lane components" step.
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    # Weekly, Mondays 06:17 UTC.
+    - cron: "17 6 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  rebuild:
+    name: Rebuild CLI components
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Configure Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      # Installs the repo-pinned toolchains (rust, wasm-tools, wasmtime) from
+      # mise.toml so the driver has wasm-tools/wasmtime on PATH.
+      - name: Install mise
+        uses: jdx/mise-action@v3
+        with:
+          cache: false
+
+      - name: Validate manifests
+        run: cargo run -p conch-build -- --check
+
+      - name: Rebuild Go-lane components
+        # TODO(#53): bootstrap the pinned wasip3 Go toolchain image here, then
+        # drop this guard so gh/gcx actually rebuild and bit-rot fails the job.
+        run: |
+          set -euo pipefail
+          if [ -z "${CONCH_GO_WASIP3_ROOT:-}" ] && [ ! -x scratch/go-wasip3/bin/go ]; then
+            echo "::notice::wasip3 Go toolchain not available in CI yet — skipping the gh/gcx rebuild. Blocked on the pinned toolchain image (#53)."
+            exit 0
+          fi
+          fail=0
+          for cli in gh gcx; do
+            echo "::group::build-cli $cli"
+            cargo run -q -p conch-build -- "$cli" || { echo "::error::rebuild of $cli failed"; fail=1; }
+            echo "::endgroup::"
+          done
+          exit $fail

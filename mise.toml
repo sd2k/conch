@@ -188,6 +188,10 @@ cargo run -q -p conch-build -- "$NAME"
 description = "List available CLI build manifests"
 run = "cargo run -q -p conch-build -- --list"
 
+[tasks.check-clis]
+description = "Validate all CLI build manifests (parse + referenced files) without building"
+run = "cargo run -q -p conch-build -- --check"
+
 [tasks.compile-shell-cwasm]
 description = "Pre-compile shell to cwasm for fast startup (~0.2s vs ~2.5s)"
 depends = ["wasm-build"]
