@@ -51,7 +51,17 @@ jobs:
           path: scratch/go-wasip3
           key: go-wasip3-${{ hashFiles('ci/bootstrap-go-wasip3.sh') }}
 
-      - uses: ./.github/actions/setup-rust
+      # Lightweight toolchain setup (rust + wasm-tools + wasmtime from mise).
+      # Deliberately avoids the shared setup-rust action: this job doesn't run
+      # tests, and that action's cargo-binstall of nextest flakes on GitHub API
+      # rate limits.
+      - name: Install mise toolchains
+        uses: jdx/mise-action@v3
+        with:
+          cache: false
+
+      - name: Add wasm32-wasip2 target
+        run: rustup target add wasm32-wasip2
 
       # Bootstrap toolchain for building the Go fork from source.
       - uses: actions/setup-go@v5
