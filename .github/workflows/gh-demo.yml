@@ -1,0 +1,91 @@
+name: gh demo (wasip3)
+
+# Reproducibly builds the `gh` CLI component from our pinned wasip3 Go fork
+# (sd2k/go @ WASI 0.3.0-rc-2026-03-15) and runs it through conch end-to-end,
+# asserting `gh --version` works. This is the reproducible-in-CI milestone for
+# issues #53 / #27 (and the build half doubles as the #29 bit-rot check).
+#
+# Heavy (~10-15 min cold): builds the Go toolchain from source. The toolchain is
+# cached keyed on the pinned commit, so warm runs skip that.
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: "23 6 * * 1" # weekly, Mondays
+  pull_request:
+    branches: [main]
+    paths:
+      - "ci/bootstrap-go-wasip3.sh"
+      - "clis/**"
+      - "crates/conch-build/**"
+      - "crates/conch/**"
+      - "crates/conch-cli/**"
+      - "crates/conch-shell/**"
+      - "mise.toml"
+      - ".github/workflows/gh-demo.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  gh-demo:
+    name: Build gh & run in conch
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Configure Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      # Cache the (slow) source build of the wasip3 Go toolchain, keyed on the
+      # pinned commit embedded in the bootstrap script.
+      - name: Cache wasip3 Go toolchain
+        uses: actions/cache@v4
+        with:
+          path: scratch/go-wasip3
+          key: go-wasip3-${{ hashFiles('ci/bootstrap-go-wasip3.sh') }}
+
+      - uses: ./.github/actions/setup-rust
+
+      # Bootstrap toolchain for building the Go fork from source.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      - name: Bootstrap wasip3 Go toolchain (sd2k/go, pinned)
+        run: |
+          export GOROOT_BOOTSTRAP="$(go env GOROOT)"
+          GOROOT="$(ci/bootstrap-go-wasip3.sh scratch/go-wasip3)"
+          echo "CONCH_GO_WASIP3_ROOT=$GOROOT" >> "$GITHUB_ENV"
+
+      - name: Check out gh source (pinned tag)
+        run: |
+          if [ ! -d scratch/gh-cli/.git ]; then
+            git clone --depth 1 --branch v2.87.3 https://github.com/cli/cli.git scratch/gh-cli
+          fi
+
+      - name: Build the embedded shell (wasm + cwasm)
+        run: mise run compile-shell-cwasm
+
+      - name: Build the gh component
+        run: mise run build-cli -- gh
+
+      - name: Run gh --version through conch
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/conch-cmds
+          cp scratch/gh-component/component.wasm /tmp/conch-cmds/gh.wasm
+          out="$(cargo run -q -p conch-cli -- --commands-dir /tmp/conch-cmds -c 'gh --version')"
+          echo "--- gh --version output ---"
+          echo "$out"
+          echo "$out" | grep -q 'gh version 2.87.3' || {
+            echo "::error::gh did not run as expected through conch"
+            exit 1
+          }
+          echo "gh ran successfully in conch ✅"
