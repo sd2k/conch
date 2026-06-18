@@ -6,9 +6,12 @@
 //! CLI is a config change + spike, not a bespoke script.
 //!
 //! Usage:
-//!   conch-build <name>          Build clis/<name>.toml (e.g. `conch-build gh`)
-//!   conch-build <path.toml>     Build a manifest at an explicit path
-//!   conch-build --list          List available manifests in clis/
+//!
+//! ```text
+//! conch-build <name>          Build clis/<name>.toml (e.g. `conch-build gh`)
+//! conch-build <path.toml>     Build a manifest at an explicit path
+//! conch-build --list          List available manifests in clis/
+//! ```
 //!
 //! Run from the repo root (the mise `build-cli` task does this). Toolchains
 //! (`wasm-tools`, `wasmtime`) come from PATH; the Go lane also needs the wasip3
