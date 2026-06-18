@@ -216,6 +216,21 @@ fi
 echo "wasi-sdk ready at: $SDK"
 """
 
+[tasks.fetch-curl]
+description = "Clone the pinned curl source into scratch/curl"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+DIR=scratch/curl
+REF=curl-8_20_0
+if [ -d "$DIR/.git" ]; then
+    echo "curl source already present ($(git -C "$DIR" describe --tags 2>/dev/null || echo unknown))"
+    exit 0
+fi
+echo "Cloning curl @ $REF"
+git clone --depth 1 --branch "$REF" https://github.com/curl/curl.git "$DIR"
+"""
+
 [tasks.fetch-sqlite]
 description = "Fetch the pinned SQLite amalgamation source into scratch/sqlite"
 run = """
@@ -341,4 +356,20 @@ cp target/wasm32-wasip2/release/conch-test-cmd.wasm /tmp/conch-cmds/upper.wasm
 echo "--- sqlite3 :memory: piped through upper ---"
 cargo run -q -p conch-cli -- --commands-dir /tmp/conch-cmds \
     -c "sqlite3 :memory: \\"SELECT 'hello from sqlite ' || sqlite_version()\\" | upper"
+"""
+
+[tasks.demo-curl]
+description = "Demo: build curl (C/CMake lane) and fetch a plaintext URL through conch (#79, M2)"
+depends = ["ensure-wasi-sdk", "fetch-curl", "wasm-build", "compile-shell-cwasm"]
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+export WASI_SDK_PATH="$(mise where "github:WebAssembly/wasi-sdk@{{vars.wasi_sdk_version}}")"
+cargo run -q -p conch-build -- curl
+mkdir -p /tmp/conch-cmds
+cp scratch/curl-component/component.wasm /tmp/conch-cmds/curl.wasm
+echo "--- curl --version (M1) ---"
+cargo run -q -p conch-cli -- --commands-dir /tmp/conch-cmds -c "curl --version"
+echo "--- curl -sSI http://example.com (M2, plaintext HTTP) ---"
+cargo run -q -p conch-cli -- --commands-dir /tmp/conch-cmds -c "curl -sSI http://example.com"
 """

@@ -46,6 +46,19 @@ pub enum Lang {
     Go,
 }
 
+/// How the C lane builds a CLI.
+#[derive(Debug, Deserialize, Default, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CBuildSystem {
+    /// A single `clang` invocation over an explicit source list
+    /// (amalgamation-style, e.g. sqlite3). The default.
+    #[default]
+    Single,
+    /// Configure + build a CMake project with the wasi-sdk toolchain file
+    /// (e.g. curl). Uses `cmake_flags` and `artifact`.
+    Cmake,
+}
+
 /// Where a CLI's source comes from.
 #[derive(Debug, Deserialize)]
 pub struct Source {
@@ -70,18 +83,30 @@ pub struct Build {
     /// compile for the wasm target.
     #[serde(default)]
     pub vendor_patch: Option<PathBuf>,
-    /// C lane: source files to compile, relative to the source dir
+    /// C lane: which build system to use (`single` clang call vs `cmake`).
+    #[serde(default)]
+    pub system: CBuildSystem,
+    /// C lane (`single`): source files to compile, relative to the source dir
     /// (e.g. the SQLite amalgamation's `shell.c`, `sqlite3.c`).
     #[serde(default)]
     pub sources: Vec<PathBuf>,
     /// C lane: compiler flags — defines, optimization, feature toggles
-    /// (e.g. `-O2`, `-DSQLITE_THREADSAFE=0`).
+    /// (e.g. `-O2`, `-DSQLITE_THREADSAFE=0`). For `cmake` builds these are
+    /// passed via `CMAKE_C_FLAGS`.
     #[serde(default)]
     pub cflags: Vec<String>,
     /// C lane: linker flags (e.g. wasi-sdk emulation libs like
-    /// `-lwasi-emulated-signal`).
+    /// `-lwasi-emulated-signal`). For `cmake` builds these go via
+    /// `CMAKE_EXE_LINKER_FLAGS`.
     #[serde(default)]
     pub link_flags: Vec<String>,
+    /// C lane (`cmake`): extra `-D…` flags for the `cmake` configure step.
+    #[serde(default)]
+    pub cmake_flags: Vec<String>,
+    /// C lane (`cmake`): built artifact path relative to the CMake build dir
+    /// (e.g. `src/curl`); copied to `<output>/component.wasm`.
+    #[serde(default)]
+    pub artifact: Option<PathBuf>,
 }
 
 fn default_package() -> String {
@@ -174,6 +199,38 @@ mod tests {
         assert_eq!(m.build.link_flags, ["-lwasi-emulated-signal"]);
         // No [component] table → defaulted.
         assert_eq!(m.component.world, "command");
+        // Default build system is `single`.
+        assert_eq!(m.build.system, CBuildSystem::Single);
+    }
+
+    /// A C/CMake manifest (curl-style) parses `system = "cmake"` plus its
+    /// cmake_flags/artifact fields.
+    #[test]
+    fn parses_c_cmake_manifest() {
+        let toml = r#"
+            name = "curl"
+            lang = "c"
+            [source]
+            repo = "https://github.com/curl/curl.git"
+            ref = "curl-8_20_0"
+            dir = "scratch/curl"
+            [build]
+            system = "cmake"
+            artifact = "src/curl"
+            cflags = ["-DPOLLPRI=0"]
+            cmake_flags = ["-DCURL_ENABLE_SSL=OFF", "-DBUILD_CURL_EXE=ON"]
+            [output]
+            dir = "scratch/curl-component"
+        "#;
+        let m: Manifest = toml::from_str(toml).expect("cmake manifest should parse");
+        assert_eq!(m.build.system, CBuildSystem::Cmake);
+        assert_eq!(m.build.artifact, Some(PathBuf::from("src/curl")));
+        assert_eq!(
+            m.build.cmake_flags,
+            ["-DCURL_ENABLE_SSL=OFF", "-DBUILD_CURL_EXE=ON"]
+        );
+        // sources is unused in cmake mode and defaults empty.
+        assert!(m.build.sources.is_empty());
     }
 
     /// A Go-lane manifest still parses, and its C-only `[build]` fields default
