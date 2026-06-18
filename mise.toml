@@ -246,6 +246,24 @@ echo "Cloning curl @ $REF"
 git clone --depth 1 --branch "$REF" https://github.com/curl/curl.git "$DIR"
 """
 
+[tasks.fetch-mbedtls]
+description = "Fetch the pinned mbedTLS release tarball into scratch/mbedtls (curl TLS dep)"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+DIR=scratch/mbedtls
+VER=3.6.6
+URL="https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-${VER}/mbedtls-${VER}.tar.bz2"
+if [ -f "$DIR/library/CMakeLists.txt" ]; then
+    echo "mbedtls source already present ($(grep -m1 'define MBEDTLS_VERSION_STRING ' "$DIR/include/mbedtls/build_info.h" 2>/dev/null || echo unknown))"
+    exit 0
+fi
+mkdir -p "$DIR"
+echo "Fetching $URL"
+curl -sL "$URL" | tar xj -C "$DIR" --strip-components=1
+echo "Fetched mbedtls $VER"
+"""
+
 [tasks.fetch-sqlite]
 description = "Fetch the pinned SQLite amalgamation source into scratch/sqlite"
 run = """
@@ -394,8 +412,8 @@ cargo run -q -p conch-cli -- --commands-dir /tmp/conch-cmds --sandbox-root /tmp/
 """
 
 [tasks.demo-curl]
-description = "Demo: build curl (C/CMake lane) and fetch a plaintext URL through conch (#79, M2)"
-depends = ["ensure-wasi-sdk", "fetch-curl", "wasm-build", "compile-shell-cwasm"]
+description = "Demo: build curl + mbedTLS (C/CMake lane) and fetch HTTPS through conch (#79)"
+depends = ["ensure-wasi-sdk", "fetch-curl", "fetch-mbedtls", "wasm-build", "compile-shell-cwasm"]
 run = """
 #!/usr/bin/env bash
 set -euo pipefail
@@ -403,8 +421,15 @@ export WASI_SDK_PATH="$(mise where "github:WebAssembly/wasi-sdk@{{vars.wasi_sdk_
 cargo run -q -p conch-build -- curl
 mkdir -p /tmp/conch-cmds
 cp scratch/curl-component/component.wasm /tmp/conch-cmds/curl.wasm
+# Sandbox with the resolved CA bundle (WASI doesn't follow symlinks).
+CERT=$(readlink -f /etc/ssl/certs/ca-certificates.crt 2>/dev/null || echo /etc/ssl/certs/ca-certificates.crt)
+mkdir -p /tmp/curl-tls-root/etc/ssl/certs
+cp "$CERT" /tmp/curl-tls-root/etc/ssl/certs/ca-certificates.crt
 echo "--- curl --version (M1) ---"
 cargo run -q -p conch-cli -- --commands-dir /tmp/conch-cmds -c "curl --version"
-echo "--- curl -sSI http://example.com (M2, plaintext HTTP) ---"
+echo "--- curl -sSI http://example.com (M2, plaintext) ---"
 cargo run -q -p conch-cli -- --commands-dir /tmp/conch-cmds -c "curl -sSI http://example.com"
+echo "--- curl HTTPS with cert verification (M3, mbedTLS) ---"
+cargo run -q -p conch-cli -- --commands-dir /tmp/conch-cmds --sandbox-root /tmp/curl-tls-root \
+    -c "curl -sSI --cacert /etc/ssl/certs/ca-certificates.crt https://example.com"
 """

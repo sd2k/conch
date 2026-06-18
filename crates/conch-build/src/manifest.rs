@@ -30,8 +30,57 @@ pub struct Manifest {
     /// Optional cwasm pre-compilation.
     #[serde(default)]
     pub cwasm: Cwasm,
+    /// External libraries built before the main project (C lane). Each exposes
+    /// libs/headers the main build references via `{dep:NAME:src}` /
+    /// `{dep:NAME:build}` placeholders in its `cmake_flags`/`link_flags`.
+    #[serde(default)]
+    pub deps: Vec<Dep>,
     /// Where built artifacts are written.
     pub output: Output,
+}
+
+/// A dependency library built before the main project (C lane only).
+///
+/// Built into `<dir>/build` with the wasi-sdk wasip2 toolchain; produces static
+/// libs + headers the parent build links against. Any `shims` are compiled with
+/// this dep's `cflags` + its include dir and linked into the parent — the hook
+/// for WASI glue a library can't provide itself (e.g. mbedTLS entropy/time).
+#[derive(Debug, Deserialize)]
+pub struct Dep {
+    /// Identifier used in the parent's `{dep:NAME:src}` / `{dep:NAME:build}`
+    /// placeholders.
+    pub name: String,
+    /// Upstream URL (tarball or git) — provenance + the fetch hint on error.
+    #[serde(default)]
+    pub url: String,
+    /// Pinned version/ref.
+    #[serde(rename = "ref", default)]
+    pub git_ref: String,
+    /// Local source dir, relative to the repo root.
+    pub dir: PathBuf,
+    /// Build system (currently only `cmake` is supported for deps).
+    #[serde(default)]
+    pub system: CBuildSystem,
+    /// Header include dir relative to `dir` (used when compiling `shims`).
+    #[serde(default = "default_include")]
+    pub include: PathBuf,
+    /// Patch applied to the dep source before building (e.g. config tweaks).
+    #[serde(default)]
+    pub config_patch: Option<PathBuf>,
+    /// Compiler flags (passed via `CMAKE_C_FLAGS`).
+    #[serde(default)]
+    pub cflags: Vec<String>,
+    /// CMake configure flags.
+    #[serde(default)]
+    pub cmake_flags: Vec<String>,
+    /// Extra C sources (repo-root-relative) compiled with this dep's `cflags` +
+    /// include dir, then linked into the main build.
+    #[serde(default)]
+    pub shims: Vec<PathBuf>,
+}
+
+fn default_include() -> PathBuf {
+    PathBuf::from("include")
 }
 
 /// The language lane used to build a CLI, per ADR #26.
@@ -261,6 +310,60 @@ mod tests {
         assert_eq!(m.lang, Lang::Rust);
         assert_eq!(m.build.bin.as_deref(), Some("rg"));
         assert_eq!(m.build.cargo_flags, ["--no-default-features"]);
+    }
+
+    /// A C/CMake manifest with a `[[deps]]` library (curl + mbedTLS) parses the
+    /// dep fields and defaults; manifests without deps default to empty.
+    #[test]
+    fn parses_deps() {
+        let toml = r#"
+            name = "curl"
+            lang = "c"
+            [source]
+            repo = "https://github.com/curl/curl.git"
+            ref = "curl-8_20_0"
+            dir = "scratch/curl"
+            [build]
+            system = "cmake"
+            artifact = "src/curl"
+            cmake_flags = ["-DMBEDTLS_LIBRARY={dep:mbedtls:build}/library/libmbedtls.a"]
+            [[deps]]
+            name = "mbedtls"
+            url = "https://example.com/mbedtls-3.6.6.tar.bz2"
+            ref = "3.6.6"
+            dir = "scratch/mbedtls"
+            system = "cmake"
+            config_patch = "clis/patches/patch-mbedtls.sh"
+            cflags = ["-DMBEDTLS_ENTROPY_HARDWARE_ALT"]
+            cmake_flags = ["-DENABLE_TESTING=OFF"]
+            shims = ["clis/shims/mbedtls-wasi.c"]
+            [output]
+            dir = "scratch/curl-component"
+        "#;
+        let m: Manifest = toml::from_str(toml).expect("deps manifest should parse");
+        assert_eq!(m.deps.len(), 1);
+        let dep = &m.deps[0];
+        assert_eq!(dep.name, "mbedtls");
+        assert_eq!(dep.system, CBuildSystem::Cmake);
+        assert_eq!(dep.include, PathBuf::from("include")); // defaulted
+        assert_eq!(dep.shims, vec![PathBuf::from("clis/shims/mbedtls-wasi.c")]);
+        assert!(dep.config_patch.is_some());
+
+        // A manifest without [[deps]] defaults to empty.
+        let no_deps = r#"
+            name = "sqlite3"
+            lang = "c"
+            [source]
+            repo = "x"
+            ref = "1"
+            dir = "scratch/sqlite"
+            [build]
+            sources = ["sqlite3.c"]
+            [output]
+            dir = "out"
+        "#;
+        let m2: Manifest = toml::from_str(no_deps).expect("parses");
+        assert!(m2.deps.is_empty());
     }
 
     /// A Go-lane manifest still parses, and its C-only `[build]` fields default

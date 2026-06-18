@@ -1,12 +1,13 @@
 name: curl demo (C lane, CMake)
 
 # Builds curl as a wasip2 component via the C lane's CMake build system
-# (wasi-sdk's wasm32-wasip2 clang) and runs it through conch end-to-end:
+# (wasi-sdk's wasm32-wasip2 clang), with mbedTLS built as a [[deps]] library, and
+# runs it through conch end-to-end:
 #   - M1: `curl --version` (no network)
 #   - M2: `curl -sSI http://example.com` (plaintext HTTP — DNS + TCP via the
 #         host's wasi:sockets)
-# This is the reproducible-in-CI proof for issue #79 (plaintext HTTP). TLS/HTTPS
-# (M3) is follow-up work.
+#   - M3: `curl https://example.com` with cert verification (TLS via mbedTLS)
+# This is the reproducible-in-CI proof for issue #79.
 #
 # The wasi-sdk install is cached keyed on mise.toml.
 
@@ -71,6 +72,9 @@ jobs:
       - name: Clone curl source (pinned)
         run: mise run fetch-curl
 
+      - name: Fetch mbedTLS source (pinned, TLS dep)
+        run: mise run fetch-mbedtls
+
       - name: Build the embedded shell (wasm + cwasm)
         run: mise run compile-shell-cwasm
 
@@ -98,4 +102,16 @@ jobs:
             echo "::error::curl plaintext HTTP did not return 200 through conch"
             exit 1
           }
-          echo "curl ran successfully in conch (M1 + M2) ✅"
+
+          echo "--- M3: curl HTTPS with cert verification (mbedTLS) ---"
+          CERT=$(readlink -f /etc/ssl/certs/ca-certificates.crt)
+          mkdir -p /tmp/curl-tls-root/etc/ssl/certs
+          cp "$CERT" /tmp/curl-tls-root/etc/ssl/certs/ca-certificates.crt
+          tls="$(cargo run -q -p conch-cli -- --commands-dir /tmp/conch-cmds --sandbox-root /tmp/curl-tls-root \
+            -c 'curl -sSI --cacert /etc/ssl/certs/ca-certificates.crt https://example.com')"
+          echo "$tls"
+          echo "$tls" | grep -qiE '^HTTP/.* 200' || {
+            echo "::error::curl HTTPS (mbedTLS) did not return 200 through conch"
+            exit 1
+          }
+          echo "curl ran successfully in conch (M1 + M2 + M3/HTTPS) ✅"

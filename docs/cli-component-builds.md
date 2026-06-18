@@ -10,7 +10,7 @@ mise run list-clis            # show available manifests
 mise run check-clis           # validate all manifests without building
 mise run build-cli -- gh      # build clis/gh.toml → scratch/gh-component/component.wasm
 mise run demo-sqlite          # build sqlite3 (C lane, single) + run a query through conch
-mise run demo-curl            # build curl (C lane, cmake) + fetch http:// through conch
+mise run demo-curl            # build curl + mbedTLS (C lane, cmake) + fetch https:// through conch
 mise run demo-ripgrep         # build rg (Rust lane) + search a mounted dir through conch
 ```
 
@@ -71,6 +71,20 @@ The C lane has two build systems, set by `[build] system`:
 See `clis/sqlite3.toml` (single) and `clis/curl.toml` (cmake) for worked
 examples of the WASI workarounds a real C CLI needs.
 
+#### Dependency libraries (`[[deps]]`)
+
+A C-lane manifest can declare `[[deps]]` — external libraries built (CMake →
+wasip2 static libs) **before** the main project. Each dep is built into
+`<dir>/build`; the main build references its outputs via placeholders the lane
+substitutes in `cmake_flags`/`link_flags`:
+
+- `{dep:NAME:src}` → the dep's source dir, `{dep:NAME:build}` → its build dir,
+  `{repo}` → the repo root.
+
+A dep may also list `shims` — small C sources (e.g. WASI glue a library can't
+provide itself) compiled with the dep's `cflags` + its include dir, and linked
+into the main component automatically. curl's TLS (mbedTLS) is the first user.
+
 **sqlite3 spike findings (#52):** compiles clean once you (a) link the wasi-sdk
 emulation libs for `signal`/`getpid`, (b) define `__minux` to drop the
 `getrusage`-based `.timer` (WASI has no `getrusage`), and (c) set
@@ -82,11 +96,12 @@ filesystem, so the "watch for locking" risk did not bite. (jq, the original
 candidate, was dropped: the shell already embeds jaq, so a jq component is
 redundant; sqlite is non-redundant and an easier amalgamation build.)
 
-**curl spike findings (#79):** `mise run demo-curl` builds curl (CMake, SSL +
-all optional deps off) and runs `curl --version` and `curl -sSI http://…`
-through conch. **Plaintext HTTP works end-to-end** — DNS + TCP connect are
-served by the host's `wasi:sockets` (the conch child gets `inherit_network` +
-`allow_ip_name_lookup`). The build needs, in `clis/curl.toml`:
+**curl spike findings (#79):** `mise run demo-curl` builds curl (CMake) + mbedTLS
+and runs `curl --version`, `curl -sSI http://…`, and **`curl https://…` with
+cert verification** through conch. **Plaintext HTTP and HTTPS both work
+end-to-end** — DNS + TCP connect are served by the host's `wasi:sockets` (the
+conch child gets `inherit_network` + `allow_ip_name_lookup`). The base build
+needs, in `clis/curl.toml`:
 - `-DPOLLPRI=0` (WASI `poll.h` lacks the OOB-poll flag),
 - `-D_WASI_EMULATED_SIGNAL` + `-lwasi-emulated-signal`,
 - `-mllvm -wasm-enable-sjlj` so `setjmp.h` compiles (the alarm-based DNS-timeout
@@ -98,9 +113,25 @@ served by the host's `wasi:sockets` (the conch child gets `inherit_network` +
   of returning -1, which would otherwise crash every transfer. The local-IP
   info it gathers is non-essential.
 
-**TLS/HTTPS (M3) is not done yet** — the host exposes raw TCP (`wasi:sockets`),
-not `wasi:http`, so TLS must be linked into the guest (a wasi-buildable
-mbedTLS/wolfSSL). That's the next step for #79.
+**TLS/HTTPS (M3) — done, via mbedTLS.** The host exposes raw TCP (`wasi:sockets`),
+not `wasi:http`, so TLS is linked into the guest: mbedTLS 3.6.x is built as a
+`[[deps]]` library (CMake → wasip2 static libs) and curl links against it
+(`CURL_USE_MBEDTLS=ON`). The WASI-specific bits:
+- **entropy** (the crux): WASI has no `/dev/urandom`, so mbedTLS is built with
+  `MBEDTLS_NO_PLATFORM_ENTROPY` + `MBEDTLS_ENTROPY_HARDWARE_ALT`, and the shim
+  `clis/shims/mbedtls-wasi.c` provides `mbedtls_hardware_poll()` via
+  `getentropy()`.
+- **ms-time**: `MBEDTLS_PLATFORM_MS_TIME_ALT` + a shim `mbedtls_ms_time()` over
+  `clock_gettime(CLOCK_MONOTONIC)` (WASI doesn't advertise the POSIX-timer macros
+  mbedTLS probes for, though the clock works).
+- **config**: disable `MBEDTLS_TIMING_C` + `MBEDTLS_NET_C` (Unix-only; curl needs
+  neither) via `clis/patches/patch-mbedtls.sh`.
+- **runtime**: mount the resolved CA bundle in the sandbox and pass
+  `--cacert /etc/ssl/certs/ca-certificates.crt` (curl honors `CURL_CA_BUNDLE`,
+  not `SSL_CERT_FILE`). mbedTLS (Apache-2.0) was chosen over wolfSSL
+  (GPL/commercial) — comparable WASI effort, friendlier license.
+
+Chosen wolfSSL alternative was not needed; entropy wiring is the same either way.
 
 ## Manifest format
 
@@ -115,6 +146,10 @@ See `clis/gh.toml` and `clis/gcx.toml`. Fields:
   - C lane: `system` (`single`|`cmake`); `single` uses `sources`/`cflags`/
     `link_flags`; `cmake` uses `cmake_flags` + `artifact`. `vendor_patch` runs
     before compiling. See `clis/sqlite3.toml` and `clis/curl.toml`
+- `[[deps]]` (C lane): libraries built before the main project — `name`, `url`,
+  `ref`, `dir`, `system`, `include`, `config_patch`, `cflags`, `cmake_flags`,
+  `shims`. Referenced via `{dep:NAME:src}`/`{dep:NAME:build}` placeholders. See
+  `clis/curl.toml` (mbedTLS)
 - `[component]` `world` (Go lane's wasm-tools embed world, e.g. `command`;
   optional, defaults to `command` — the C lane ignores it)
 - `[cwasm]` `enabled`, `flags` (extra `wasmtime compile` flags)
