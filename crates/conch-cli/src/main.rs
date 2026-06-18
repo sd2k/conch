@@ -5,6 +5,8 @@
 //!   conch script.sh                       Execute a script file
 //!   conch                                 Read script from stdin
 //!   conch --commands-dir ./cmds -c "..."  Register WASM components as commands
+//!   conch --commands-dir ./cmds --sandbox-root /tmp/root -c "..."
+//!                                         Mount a sandbox root at / for spawned commands
 
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
@@ -16,6 +18,7 @@ async fn main() {
     let args: Vec<String> = std::env::args().collect();
 
     let mut commands_dir: Option<PathBuf> = None;
+    let mut sandbox_root: Option<PathBuf> = None;
     let mut script_source: Option<ScriptSource> = None;
     let mut i = 1;
 
@@ -29,6 +32,14 @@ async fn main() {
                     std::process::exit(1);
                 }
                 commands_dir = Some(PathBuf::from(&args[i]));
+            }
+            "--sandbox-root" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("conch: --sandbox-root requires an argument");
+                    std::process::exit(1);
+                }
+                sandbox_root = Some(PathBuf::from(&args[i]));
             }
             "-c" => {
                 i += 1;
@@ -72,7 +83,7 @@ async fn main() {
     let mut builder = Shell::builder();
 
     if let Some(dir) = commands_dir {
-        let registry = match load_commands_from_dir(&dir) {
+        let mut registry = match load_commands_from_dir(&dir) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!(
@@ -83,6 +94,13 @@ async fn main() {
                 std::process::exit(1);
             }
         };
+        if let Some(root) = sandbox_root {
+            eprintln!(
+                "conch: sandbox root for spawned commands: {}",
+                root.display()
+            );
+            registry.set_sandbox_root(root);
+        }
         if !registry.is_empty() {
             eprintln!(
                 "conch: registered {} command(s) from {}",

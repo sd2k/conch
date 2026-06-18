@@ -253,4 +253,4 @@ run = 'cargo run -p conch-cli -- --commands-dir /tmp/conch-cmds -c "echo hello w
 [tasks.demo-gh]
 description = "Demo: gh pr list | upper (needs setup-gh-sandbox first)"
 depends = ["wasm-build", "compile-shell-cwasm", "setup-commands-dir", "setup-gh-sandbox"]
-run = 'cargo run -p conch-cli -- --commands-dir /tmp/conch-cmds -c "gh pr list -R cli/cli --limit 3 | upper"'
+run = 'cargo run -p conch-cli -- --commands-dir /tmp/conch-cmds --sandbox-root /tmp/gh-root -c "gh pr list -R cli/cli --limit 3 | upper"'
