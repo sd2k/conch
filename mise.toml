@@ -10,6 +10,14 @@ rust = "1.92"
 [tools."github:bytecodealliance/wasm-tools"]
 version = "1.236.1"
 
+# wasmtime CLI, used to pre-compile components to cwasm for fast startup.
+# This MUST match the `wasmtime` crate version in Cargo.lock: cwasm is only
+# loadable by an engine of the same wasmtime version (`from_cwasm` falls back
+# to the slow embedded wasm on mismatch). `mise run check-wasmtime-version`
+# verifies the two stay in lockstep.
+[tools."aqua:bytecodealliance/wasmtime"]
+version = "44.0.3"
+
 # =============================================================================
 # Core development tasks
 # =============================================================================
@@ -72,14 +80,18 @@ sources = ["crates/conch-shell/src/**/*.rs", "crates/conch-shell/Cargo.toml", "c
 outputs = ["target/wasm32-wasip2/release-wasm/conch_shell.wasm"]
 run = "cargo build -p conch-shell --target wasm32-wasip2 --profile release-wasm"
 
+# Embedded builds depend on `compile-shell-cwasm` (which itself depends on
+# `wasm-build`) so the fast-startup cwasm is produced automatically — no manual
+# compile step. `embedded()` loads the cwasm if present, else falls back to the
+# embedded wasm.
 [tasks.build-embedded]
 description = "Build library with embedded WASM shell"
-depends = ["wasm-build"]
+depends = ["compile-shell-cwasm"]
 run = "cargo build -p conch --features embedded-shell --release"
 
 [tasks.build-release]
 description = "Build all crates in release mode (with embedded shell)"
-depends = ["wasm-build"]
+depends = ["compile-shell-cwasm"]
 run = "cargo build --workspace --features embedded-shell --release"
 
 # =============================================================================
@@ -102,7 +114,7 @@ depends = ["test", "test-go"]
 
 [tasks.build-mcp]
 description = "Build the MCP server binary"
-depends = ["wasm-build"]
+depends = ["compile-shell-cwasm"]
 run = "cargo build -p conch-mcp --features conch/embedded-shell --release"
 
 [tasks.run-mcp]
@@ -130,6 +142,24 @@ run = "cargo doc --workspace --no-deps --open"
 description = "Check compilation on minimum supported Rust version"
 run = "cargo +1.92 check --workspace"
 
+[tasks.check-wasmtime-version]
+description = "Verify the mise-pinned wasmtime CLI matches the wasmtime crate in Cargo.lock"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+cli=$(wasmtime --version | awk '{print $2}')
+crate=$(awk '/^name = "wasmtime"$/{getline; gsub(/version = |"/,""); print; exit}' Cargo.lock)
+echo "wasmtime CLI:   $cli"
+echo "wasmtime crate: $crate"
+if [ "$cli" != "$crate" ]; then
+    echo "ERROR: version mismatch — cwasm produced by the CLI will not load in the" >&2
+    echo "crate engine (from_cwasm falls back to the slow embedded wasm)." >&2
+    echo "Update [tools.\\"aqua:bytecodealliance/wasmtime\\"] in mise.toml to ${crate}." >&2
+    exit 1
+fi
+echo "OK: versions match."
+"""
+
 # =============================================================================
 # Subprocess / WASI component tasks
 # =============================================================================
@@ -147,7 +177,7 @@ depends = ["wasm-build"]
 sources = ["target/wasm32-wasip2/release/conch_shell.wasm"]
 outputs = ["target/wasm32-wasip2/release/conch_shell.cwasm"]
 run = """
-scratch/wasmtime/target/release/wasmtime compile \
+wasmtime compile \
     -W epoch-interruption \
     target/wasm32-wasip2/release/conch_shell.wasm \
     -o target/wasm32-wasip2/release/conch_shell.cwasm
@@ -161,7 +191,7 @@ run = """
 set -euo pipefail
 INPUT="${1:?Usage: mise run compile-cwasm -- <input.wasm> [output.cwasm]}"
 OUTPUT="${2:-${INPUT%.wasm}.cwasm}"
-scratch/wasmtime/target/release/wasmtime compile \
+wasmtime compile \
     -W component-model-async -W component-model-async-builtins \
     "$INPUT" -o "$OUTPUT"
 echo "Compiled: $OUTPUT ($(du -h "$OUTPUT" | cut -f1))"
