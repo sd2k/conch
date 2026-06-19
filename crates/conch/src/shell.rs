@@ -447,14 +447,42 @@ impl ShellBuilder {
         // Default limits
         let limits = self.limits.unwrap_or_default();
 
+        // Filesystem template for spawned children: share this shell's storage +
+        // the same mounts, so child components see the same virtual filesystem.
+        let child_vfs = crate::executor::ChildVfs {
+            storage: vfs.clone(),
+            vfs_mounts: vfs_mounts
+                .iter()
+                .map(|m| (m.guest_path.clone(), m.dir_perms, m.file_perms))
+                .collect(),
+            real_mounts: self
+                .real_mounts
+                .iter()
+                .map(|m| {
+                    (
+                        m.guest_path.clone(),
+                        m.host_path.clone(),
+                        m.dir_perms,
+                        m.file_perms,
+                    )
+                })
+                .collect(),
+        };
+
         // Create the persistent shell instance
         let instance = if let Some(registry) = self.component_registry {
             executor
-                .create_instance_with_registry(&limits, hybrid_ctx, self.tool_handler, registry)
+                .create_instance_with_registry(
+                    &limits,
+                    hybrid_ctx,
+                    self.tool_handler,
+                    registry,
+                    child_vfs,
+                )
                 .await?
         } else {
             executor
-                .create_instance(&limits, hybrid_ctx, self.tool_handler)
+                .create_instance(&limits, hybrid_ctx, self.tool_handler, child_vfs)
                 .await?
         };
 

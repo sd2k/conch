@@ -139,13 +139,20 @@ impl Conch {
 
         // Create a minimal VFS context with a /tmp directory
         let storage = ArcStorage::new(Arc::new(InMemoryStorage::new()));
-        let mut hybrid_ctx = HybridVfsCtx::new(storage);
+        let mut hybrid_ctx = HybridVfsCtx::new(storage.clone());
         hybrid_ctx.add_vfs_preopen("/tmp", DirPerms::all(), FilePerms::all());
+
+        // Children share the same VFS storage + mounts.
+        let child_vfs = crate::executor::ChildVfs {
+            storage,
+            vfs_mounts: vec![("/tmp".to_string(), DirPerms::all(), FilePerms::all())],
+            real_mounts: vec![],
+        };
 
         // Create a temporary shell instance
         let mut instance = self
             .executor
-            .create_instance(&limits, hybrid_ctx, None)
+            .create_instance(&limits, hybrid_ctx, None, child_vfs)
             .await?;
 
         // Execute the script

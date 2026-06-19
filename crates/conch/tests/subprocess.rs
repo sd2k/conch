@@ -38,11 +38,17 @@ async fn create_shell_with_registry(
 ) -> conch::ShellInstance<ArcStorage> {
     let limits = limits();
     let storage = ArcStorage::new(std::sync::Arc::new(InMemoryStorage::new()));
-    let mut hybrid_ctx = HybridVfsCtx::new(storage);
+    let mut hybrid_ctx = HybridVfsCtx::new(storage.clone());
     hybrid_ctx.add_vfs_preopen("/scratch", DirPerms::all(), FilePerms::all());
 
+    let child_vfs = conch::ChildVfs {
+        storage,
+        vfs_mounts: vec![("/scratch".to_string(), DirPerms::all(), FilePerms::all())],
+        real_mounts: vec![],
+    };
+
     executor
-        .create_instance_with_registry(&limits, hybrid_ctx, None, registry)
+        .create_instance_with_registry(&limits, hybrid_ctx, None, registry, child_vfs)
         .await
         .expect("Failed to create shell instance with registry")
 }
@@ -324,5 +330,50 @@ async fn test_subprocess_multiline_input() {
     assert!(
         stdout.contains("WORLD"),
         "Expected WORLD in output: {stdout:?}",
+    );
+}
+
+/// Foundational (#86 follow-up): a **spawned component reads the shell's
+/// virtual filesystem**. We register uutils coreutils as `sort` (not a shell
+/// builtin, so it actually spawns), write a file into the VFS (`/scratch`) via
+/// the shell, then `sort` it through the spawned component. If the child shares
+/// the shell's VFS, it reads the file and sorts it; otherwise it can't see it.
+#[tokio::test]
+#[ignore = "needs scratch/coreutils-component/coreutils.cwasm (mise run build-cli -- coreutils)"]
+async fn test_spawned_component_reads_vfs() {
+    let cwasm_path = format!(
+        "{}/../../scratch/coreutils-component/coreutils.cwasm",
+        TEST_CMD_WASM
+    );
+    let cwasm = std::fs::read(&cwasm_path)
+        .unwrap_or_else(|e| panic!("read {cwasm_path}: {e} (mise run build-cli -- coreutils)"));
+
+    let executor = ComponentShellExecutor::embedded().expect("executor");
+    let mut registry = ComponentRegistry::new();
+    registry.register_cwasm("sort", cwasm); // multicall dispatches on argv[0]="sort"
+
+    let mut instance = create_shell_with_registry(&executor, Arc::new(registry)).await;
+    let limits = limits();
+
+    // Write a file into the VFS via the shell (echo + redirect to /scratch).
+    instance
+        .execute(
+            "echo banana > /scratch/f.txt; echo apple >> /scratch/f.txt; echo cherry >> /scratch/f.txt",
+            &limits,
+        )
+        .await
+        .expect("write to vfs");
+
+    // Spawn `sort` (a component) reading the VFS file the shell just wrote.
+    let result = instance
+        .execute("sort /scratch/f.txt", &limits)
+        .await
+        .expect("sort execute");
+
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert_eq!(
+        stdout, "apple\nbanana\ncherry\n",
+        "spawned sort should read the shell's VFS file; got stdout={stdout:?} stderr={stderr:?}"
     );
 }
