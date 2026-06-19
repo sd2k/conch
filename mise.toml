@@ -97,9 +97,12 @@ run = "cargo build -p conch-shell --target wasm32-wasip2 --profile release-wasm"
 # compile step. `embedded()` loads the cwasm if present, else falls back to the
 # embedded wasm.
 [tasks.build-embedded]
-description = "Build library with embedded WASM shell"
+description = "Build library with embedded WASM shell + coreutils"
 depends = ["compile-shell-cwasm"]
-run = "cargo build -p conch --features embedded-shell --release"
+# embedded-coreutils embeds scratch/coreutils-component/coreutils.cwasm so the
+# shell's cat/ls/… resolve via spawned coreutils (build.rs is graceful when the
+# component is absent — run `mise run coreutils` to produce it). See #86.
+run = "cargo build -p conch --features embedded-shell,embedded-coreutils --release"
 
 [tasks.build-release]
 description = "Build all crates in release mode (with embedded shell)"
@@ -215,6 +218,26 @@ if [ ! -x "$SDK/bin/clang" ]; then
 fi
 echo "wasi-sdk ready at: $SDK"
 """
+
+[tasks.fetch-coreutils]
+description = "Clone the pinned uutils/coreutils source into scratch/uutils"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+DIR=scratch/uutils
+REF=0.9.0
+if [ -d "$DIR/.git" ]; then
+    echo "uutils source already present ($(git -C "$DIR" describe --tags 2>/dev/null || echo unknown))"
+    exit 0
+fi
+echo "Cloning uutils/coreutils @ $REF"
+git clone --depth 1 --branch "$REF" https://github.com/uutils/coreutils.git "$DIR"
+"""
+
+[tasks.coreutils]
+description = "Build the coreutils component (scratch/coreutils-component/coreutils.cwasm) for embedded-coreutils / local cat-using tests"
+depends = ["fetch-coreutils"]
+run = "mise run build-cli -- coreutils"
 
 [tasks.fetch-ripgrep]
 description = "Clone the pinned ripgrep source into scratch/ripgrep"
@@ -409,6 +432,28 @@ cargo run -q -p conch-cli -- --commands-dir /tmp/conch-cmds --sandbox-root /tmp/
 echo "--- rg -n TODO /proj | upper ---"
 cargo run -q -p conch-cli -- --commands-dir /tmp/conch-cmds --sandbox-root /tmp/rg-root \
     -c "rg -n TODO /proj | upper"
+"""
+
+[tasks.demo-coreutils]
+description = "Demo: build coreutils (uutils, Rust lane) and run utils through conch (#86)"
+depends = ["wasm-target", "fetch-coreutils", "wasm-build", "compile-shell-cwasm"]
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+cargo run -q -p conch-build -- coreutils
+mkdir -p /tmp/conch-cmds /tmp/uu-root/data
+# Register the one multicall cwasm under each util name (argv[0] dispatches).
+for u in cat head tail ls wc sort cp mv rm mkdir touch; do
+    cp scratch/coreutils-component/coreutils.cwasm "/tmp/conch-cmds/$u.cwasm"
+done
+printf 'banana\\napple\\ncherry\\n' > /tmp/uu-root/data/fruit.txt
+printf '1\\n2\\n3\\n4\\n5\\n' > /tmp/uu-root/data/nums.txt
+echo "--- ls /data ---"
+cargo run -q -p conch-cli -- --commands-dir /tmp/conch-cmds --sandbox-root /tmp/uu-root -c "ls /data"
+echo "--- sort /data/fruit.txt ---"
+cargo run -q -p conch-cli -- --commands-dir /tmp/conch-cmds --sandbox-root /tmp/uu-root -c "sort /data/fruit.txt"
+echo "--- head -n 2 /data/nums.txt | wc -l ---"
+cargo run -q -p conch-cli -- --commands-dir /tmp/conch-cmds --sandbox-root /tmp/uu-root -c "head -n 2 /data/nums.txt | wc -l"
 """
 
 [tasks.demo-curl]

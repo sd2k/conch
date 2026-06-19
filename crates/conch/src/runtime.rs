@@ -149,11 +149,29 @@ impl Conch {
             real_mounts: vec![],
         };
 
+        // Ship the embedded coreutils (cat/head/ls/…) so the bare runtime can
+        // spawn them out of the box, mirroring the `Shell` builder. No-op
+        // without the `embedded-coreutils` feature (registry stays None).
+        let registry: Option<crate::executor::ComponentRegistry> = None;
+        #[cfg(feature = "embedded-coreutils")]
+        let registry = crate::executor::with_embedded_coreutils(registry);
+
         // Create a temporary shell instance
-        let mut instance = self
-            .executor
-            .create_instance(&limits, hybrid_ctx, None, child_vfs)
-            .await?;
+        let mut instance = if let Some(registry) = registry {
+            self.executor
+                .create_instance_with_registry(
+                    &limits,
+                    hybrid_ctx,
+                    None,
+                    Arc::new(registry),
+                    child_vfs,
+                )
+                .await?
+        } else {
+            self.executor
+                .create_instance(&limits, hybrid_ctx, None, child_vfs)
+                .await?
+        };
 
         // Execute the script
         instance.execute(script, &limits).await

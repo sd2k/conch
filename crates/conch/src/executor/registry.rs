@@ -129,6 +129,41 @@ impl ComponentRegistry {
 /// A shared, thread-safe component registry.
 pub type SharedRegistry = Arc<ComponentRegistry>;
 
+/// Util names the embedded uutils coreutils component is registered under
+/// (it's a multicall binary; conch dispatches on `argv[0]`).
+#[cfg(feature = "embedded-coreutils")]
+pub(crate) const COREUTILS_NAMES: &[&str] = &[
+    "cat", "head", "tail", "ls", "wc", "cp", "mv", "rm", "mkdir", "touch", "sort",
+];
+
+/// Embedded uutils coreutils component (cwasm), staged into `OUT_DIR` by
+/// `build.rs`. Empty when the component hasn't been built; auto-registration
+/// then skips it (so the build never fails on a missing artifact).
+#[cfg(feature = "embedded-coreutils")]
+static EMBEDDED_COREUTILS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/coreutils.cwasm"));
+
+/// Merge the embedded coreutils into `registry` (creating one if `None`),
+/// registering the multicall component under each [`COREUTILS_NAMES`] entry.
+///
+/// Returns the input unchanged if the component wasn't embedded, or if
+/// `CONCH_DISABLE_EMBEDDED_COREUTILS` is set in the environment (the runtime
+/// opt-out). Caller-registered commands of the same name are **not** overwritten.
+#[cfg(feature = "embedded-coreutils")]
+pub fn with_embedded_coreutils(registry: Option<ComponentRegistry>) -> Option<ComponentRegistry> {
+    if EMBEDDED_COREUTILS.is_empty()
+        || std::env::var_os("CONCH_DISABLE_EMBEDDED_COREUTILS").is_some()
+    {
+        return registry;
+    }
+    let mut reg = registry.unwrap_or_default();
+    for name in COREUTILS_NAMES {
+        if !reg.contains(name) {
+            reg.register_cwasm(*name, EMBEDDED_COREUTILS.to_vec());
+        }
+    }
+    Some(reg)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

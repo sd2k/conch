@@ -5,6 +5,7 @@
 //! where the source lives, how to patch and build it, and where artifacts land.
 //! See ADR #26 and issue #51.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -164,6 +165,11 @@ pub struct Build {
     /// `--features foo`).
     #[serde(default)]
     pub cargo_flags: Vec<String>,
+    /// Extra environment variables for the build command (e.g.
+    /// `RUSTC_BOOTSTRAP = "1"` to let a stable toolchain use an unstable std
+    /// feature). Currently honored by the Rust lane.
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
 }
 
 fn default_package() -> String {
@@ -310,6 +316,32 @@ mod tests {
         assert_eq!(m.lang, Lang::Rust);
         assert_eq!(m.build.bin.as_deref(), Some("rg"));
         assert_eq!(m.build.cargo_flags, ["--no-default-features"]);
+        assert!(m.build.env.is_empty());
+    }
+
+    /// A coreutils-style Rust manifest parses `[build.env]` (used to set
+    /// RUSTC_BOOTSTRAP for the uutils wasip2 build).
+    #[test]
+    fn parses_build_env() {
+        let toml = r#"
+            name = "coreutils"
+            lang = "rust"
+            [source]
+            repo = "https://github.com/uutils/coreutils.git"
+            ref = "0.9.0"
+            dir = "scratch/uutils"
+            [build]
+            bin = "coreutils"
+            [build.env]
+            RUSTC_BOOTSTRAP = "1"
+            [output]
+            dir = "scratch/coreutils-component"
+        "#;
+        let m: Manifest = toml::from_str(toml).expect("env manifest should parse");
+        assert_eq!(
+            m.build.env.get("RUSTC_BOOTSTRAP").map(String::as_str),
+            Some("1")
+        );
     }
 
     /// A C/CMake manifest with a `[[deps]]` library (curl + mbedTLS) parses the

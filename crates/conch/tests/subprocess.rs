@@ -377,3 +377,59 @@ async fn test_spawned_component_reads_vfs() {
         "spawned sort should read the shell's VFS file; got stdout={stdout:?} stderr={stderr:?}"
     );
 }
+
+/// Regression (#86): a spawned coreutil's final line **without** a trailing
+/// newline must not be dropped. Two buffering layers conspired to truncate it:
+/// uutils' line-buffered stdout wasn't flushed before `proc_exit`, and the
+/// shell's spawn→stdout relay didn't flush its own line-buffered stdout. We
+/// write known bytes via the storage API (ground truth), then `cat` them.
+#[tokio::test]
+#[ignore = "needs scratch/coreutils-component/coreutils.cwasm (mise run coreutils)"]
+async fn test_spawned_cat_preserves_final_partial_line() {
+    use eryx_vfs::VfsStorage;
+
+    let cwasm_path = format!(
+        "{}/../../scratch/coreutils-component/coreutils.cwasm",
+        TEST_CMD_WASM
+    );
+    let cwasm = std::fs::read(&cwasm_path).expect("read coreutils.cwasm");
+
+    let executor = ComponentShellExecutor::embedded().expect("executor");
+    let mut registry = ComponentRegistry::new();
+    registry.register_cwasm("cat", cwasm);
+    let registry = Arc::new(registry);
+
+    let limits = limits();
+    let storage = ArcStorage::new(std::sync::Arc::new(InMemoryStorage::new()));
+    storage.mkdir("/scratch").await.expect("mkdir");
+
+    for (name, bytes) in [
+        ("nonl", b"ABCDE".to_vec()),               // no trailing newline
+        ("nl", b"ABCDE\n".to_vec()),               // trailing newline
+        ("multi", b"line1\nline2\nlast".to_vec()), // last line unterminated
+    ] {
+        let path = format!("/scratch/{name}.txt");
+        storage.write(&path, &bytes).await.expect("write");
+        let mut hybrid_ctx = HybridVfsCtx::new(storage.clone());
+        hybrid_ctx.add_vfs_preopen("/scratch", DirPerms::all(), FilePerms::all());
+        let child_vfs = conch::ChildVfs {
+            storage: storage.clone(),
+            vfs_mounts: vec![("/scratch".to_string(), DirPerms::all(), FilePerms::all())],
+            real_mounts: vec![],
+        };
+        let mut instance = executor
+            .create_instance_with_registry(&limits, hybrid_ctx, None, registry.clone(), child_vfs)
+            .await
+            .expect("instance");
+        let r = instance
+            .execute(&format!("cat {path}"), &limits)
+            .await
+            .expect("cat");
+        assert_eq!(
+            r.stdout,
+            bytes,
+            "cat of {name:?} should reproduce the file byte-for-byte; got {:?}",
+            String::from_utf8_lossy(&r.stdout)
+        );
+    }
+}

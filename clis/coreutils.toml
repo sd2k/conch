@@ -1,0 +1,50 @@
+# Build manifest for uutils coreutils as a multicall WASI (wasip2) component,
+# via the Rust lane. Consumed by the `conch-build` driver:
+#   mise run build-cli -- coreutils   (or end-to-end: mise run demo-coreutils)
+# See ADR #26 and issues #86 / #84.
+#
+# This replaces conch-shell's hand-rolled coreutils builtins. The one component
+# is a multicall binary: registered under each util name (head, cat, …), conch
+# sets argv[0]=<name> so it dispatches to that util. A precompiled cwasm is
+# important — the .wasm path recompiles the ~5MB module on every spawn (~141ms
+# vs ~8ms for cwasm). Needs the I32Exit exit-handling fix (uutils calls exit()).
+
+name = "coreutils"
+description = "uutils coreutils (Rust, wasip2, multicall)"
+lang = "rust"
+
+[source]
+repo = "https://github.com/uutils/coreutils.git"
+ref = "0.9.0"
+# Local working copy the driver builds from. `mise run fetch-coreutils` clones it.
+dir = "scratch/uutils"
+
+[build]
+# Multicall binary; the artifact is coreutils.wasm.
+bin = "coreutils"
+# uucore uses unstable std::os::wasi on wasip2 — add #![feature(wasip2)].
+vendor_patch = "clis/patches/patch-uucore-wasip2.sh"
+# The utils that replace the shell builtins, plus the `sort` gap. Keep the set
+# tight: each util can pull wasi-incompatible deps.
+cargo_flags = [
+    "--no-default-features",
+    "--features",
+    "cat,head,tail,ls,wc,cp,mv,rm,mkdir,touch,sort",
+]
+# Let the pinned stable toolchain use the unstable wasip2 feature.
+[build.env]
+RUSTC_BOOTSTRAP = "1"
+
+[cwasm]
+# Precompile to cwasm: mandatory for acceptable per-spawn cost. Flags match the
+# child engine (component-model async/builtins/stackful). Built under mise so
+# `wasmtime` is the pinned 44.x that matches the conch host.
+enabled = true
+flags = [
+    "-W", "component-model-async",
+    "-W", "component-model-async-builtins",
+    "-W", "component-model-async-stackful",
+]
+
+[output]
+dir = "scratch/coreutils-component"

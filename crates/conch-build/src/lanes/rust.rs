@@ -60,7 +60,13 @@ pub fn build(manifest: &Manifest) -> Result<()> {
     ];
     args.extend(manifest.build.cargo_flags.iter().cloned());
     let args_ref: Vec<&str> = args.iter().map(String::as_str).collect();
-    run("cargo", &args_ref, &source_dir, &[])?;
+    let envs: Vec<(&str, &str)> = manifest
+        .build
+        .env
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    run("cargo", &args_ref, &source_dir, &envs)?;
 
     let artifact = source_dir
         .join("target/wasm32-wasip2/release")

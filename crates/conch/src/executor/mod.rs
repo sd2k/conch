@@ -15,6 +15,8 @@ mod component;
 mod registry;
 
 pub use component::{ComponentShellExecutor, ToolHandler, ToolRequest, ToolResult};
+#[cfg(feature = "embedded-coreutils")]
+pub use registry::with_embedded_coreutils;
 pub use registry::{ComponentRegistry, SharedRegistry};
 
 #[cfg(feature = "embedded-shell")]
