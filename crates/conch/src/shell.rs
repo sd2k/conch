@@ -213,8 +213,10 @@ pub struct ShellBuilder {
     executor: Option<ComponentShellExecutor>,
     #[cfg(feature = "embedded-shell")]
     tool_handler: Option<Arc<dyn ToolHandler>>,
+    // Held un-`Arc`'d so `build()` can merge in the embedded coreutils
+    // (feature `embedded-coreutils`) before wrapping for the executor.
     #[cfg(feature = "embedded-shell")]
-    component_registry: Option<Arc<crate::executor::ComponentRegistry>>,
+    component_registry: Option<crate::executor::ComponentRegistry>,
     limits: Option<ResourceLimits>,
 }
 
@@ -376,7 +378,7 @@ impl ShellBuilder {
     /// ```
     #[cfg(feature = "embedded-shell")]
     pub fn component_registry(mut self, registry: crate::executor::ComponentRegistry) -> Self {
-        self.component_registry = Some(Arc::new(registry));
+        self.component_registry = Some(registry);
         self
     }
 
@@ -469,14 +471,21 @@ impl ShellBuilder {
                 .collect(),
         };
 
+        // Merge in the embedded coreutils (cat/head/ls/…) so the shell ships
+        // with them out of the box, unless opted out. Caller-registered commands
+        // win. No-op without the `embedded-coreutils` feature.
+        let registry = self.component_registry;
+        #[cfg(feature = "embedded-coreutils")]
+        let registry = crate::executor::with_embedded_coreutils(registry);
+
         // Create the persistent shell instance
-        let instance = if let Some(registry) = self.component_registry {
+        let instance = if let Some(registry) = registry {
             executor
                 .create_instance_with_registry(
                     &limits,
                     hybrid_ctx,
                     self.tool_handler,
-                    registry,
+                    Arc::new(registry),
                     child_vfs,
                 )
                 .await?

@@ -1,0 +1,79 @@
+name: coreutils demo (Rust lane)
+
+# Builds uutils coreutils as a multicall wasip2 component via the Rust lane and
+# runs several utils through conch end-to-end — the replacement for conch-shell's
+# hand-rolled coreutils builtins (issue #86, epic #84). Registered under each
+# util name; conch sets argv[0]=<name> so the multicall dispatches.
+
+on:
+  workflow_dispatch: {}
+  pull_request:
+    branches: [main]
+    paths:
+      - "clis/coreutils.toml"
+      - "clis/patches/patch-uucore-wasip2.sh"
+      - "crates/conch-build/**"
+      - "crates/conch/**"
+      - "crates/conch-cli/**"
+      - "crates/conch-shell/**"
+      - "mise.toml"
+      - ".github/workflows/coreutils-demo.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  coreutils-demo:
+    name: Build coreutils & run in conch
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Configure Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install mise toolchains
+        uses: jdx/mise-action@v3
+        with:
+          cache: false
+
+      - name: Add wasm32-wasip2 target
+        run: rustup target add wasm32-wasip2
+
+      - name: Clone uutils source (pinned)
+        run: mise run fetch-coreutils
+
+      - name: Build the embedded shell (wasm + cwasm)
+        run: mise run compile-shell-cwasm
+
+      - name: Build the coreutils component (+cwasm)
+        run: mise run build-cli -- coreutils
+
+      - name: Run coreutils through conch
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/conch-cmds /tmp/uu-root/data
+          # Register the one multicall cwasm under each util name.
+          for u in cat head tail ls wc sort cp mv rm mkdir touch; do
+            cp scratch/coreutils-component/coreutils.cwasm "/tmp/conch-cmds/$u.cwasm"
+          done
+          printf 'banana\napple\ncherry\n' > /tmp/uu-root/data/fruit.txt
+          printf '1\n2\n3\n4\n5\n' > /tmp/uu-root/data/nums.txt
+
+          echo "--- sort ---"
+          out="$(cargo run -q -p conch-cli -- --commands-dir /tmp/conch-cmds --sandbox-root /tmp/uu-root -c 'sort /data/fruit.txt')"
+          echo "$out"
+          [ "$(echo "$out" | head -1)" = "apple" ] || { echo "::error::sort did not sort through conch"; exit 1; }
+
+          echo "--- head | wc -l (pipeline across two coreutils) ---"
+          n="$(cargo run -q -p conch-cli -- --commands-dir /tmp/conch-cmds --sandbox-root /tmp/uu-root -c 'head -n 2 /data/nums.txt | wc -l')"
+          echo "$n"
+          [ "$(echo "$n" | tr -d ' ')" = "2" ] || { echo "::error::head|wc pipeline wrong through conch"; exit 1; }
+
+          echo "coreutils ran successfully in conch ✅"

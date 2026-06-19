@@ -155,6 +155,18 @@ impl exports::conch::shell::shell::GuestInstance for ShellInstance {
                 .map_err(|e| format!("execution error: {}", e))
         })?;
 
+        // Our stdout/stderr are line-buffered (std::io::Stdout wraps a
+        // LineWriter). A command whose final line has no trailing newline —
+        // e.g. a spawned `cat` of a file not ending in '\n' — leaves that line
+        // in the buffer; without an explicit flush the host reads the captured
+        // streams before it drains and the tail is silently lost. Flush both
+        // before returning so captured output is byte-complete.
+        {
+            use std::io::Write as _;
+            let _ = std::io::stdout().flush();
+            let _ = std::io::stderr().flush();
+        }
+
         let exit_code = i32::from(u8::from(result.exit_code));
         *self.last_exit_code.borrow_mut() = exit_code;
 

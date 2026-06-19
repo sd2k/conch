@@ -12,6 +12,7 @@ mise run build-cli -- gh      # build clis/gh.toml → scratch/gh-component/comp
 mise run demo-sqlite          # build sqlite3 (C lane, single) + run a query through conch
 mise run demo-curl            # build curl (C lane, cmake) + fetch http:// through conch
 mise run demo-ripgrep         # build rg (Rust lane) + search a mounted dir through conch
+mise run demo-coreutils       # build uutils coreutils (Rust lane) + run utils through conch
 ```
 
 Each CLI is described by a manifest in `clis/<name>.toml`. The `conch-build`
@@ -23,7 +24,7 @@ bespoke script.
 
 | Lane | `lang` | Toolchain | Target | Status |
 |------|--------|-----------|--------|--------|
-| Rust | `rust` | cargo (mise-pinned) | wasip2 | implemented (ripgrep, #85) |
+| Rust | `rust` | cargo (mise-pinned) | wasip2 | implemented (ripgrep #85; coreutils #86) |
 | C/C++ | `c` | wasi-sdk `wasm32-wasip2` clang | wasip2 | implemented (sqlite3 #52; curl plaintext HTTP #79) |
 | Go | `go` | wasip3 Go fork + wasm-tools | wasip3 | implemented (gh, gcx) |
 
@@ -33,9 +34,23 @@ bespoke script.
 lane: since Rust 1.82 the `wasm32-wasip2` target **emits a component directly**,
 so the lane is just `cargo build --release --target wasm32-wasip2 --bin <bin>`,
 then the artifact `target/wasm32-wasip2/release/<bin>.wasm` is the component — no
-`wasm-tools` step, no wasi-sdk. Config: `[build] bin` (required) and optional
-`cargo_flags`. The `wasm32-wasip2` rustup target must be installed (the mise
-`wasm-target` task); cargo comes from PATH.
+`wasm-tools` step, no wasi-sdk. Config: `[build] bin` (required), optional
+`cargo_flags`, and `[build.env]` (extra env for the cargo invocation). The
+`wasm32-wasip2` rustup target must be installed (the mise `wasm-target` task);
+cargo comes from PATH.
+
+**coreutils (#86):** `mise run demo-coreutils` builds **uutils** as a multicall
+`coreutils` component (`clis/coreutils.toml`) that replaces conch-shell's
+hand-rolled `cat`/`head`/`tail`/`ls`/`wc`/`cp`/`mv`/`rm`/`mkdir`/`touch` builtins
+(plus the missing `sort`). Registered under each util name, it dispatches on
+`argv[0]` (conch sets it to the command name). Two wrinkles, both in the
+manifest: `uucore` uses an unstable `std::os::wasi` API on wasip2, so a
+`vendor_patch` adds `#![feature(wasip2)]` and `[build.env] RUSTC_BOOTSTRAP="1"`
+lets the pinned stable toolchain accept it; and `[cwasm] enabled` is **important
+for perf** — the `.wasm` path recompiles the ~5 MB module on every spawn (~141 ms
+vs ~8 ms for the precompiled cwasm; build under mise so `wasmtime` is the pinned
+44.x). Needs the `I32Exit` exit-handling fix (uutils calls `std::process::exit`).
+`grep`/`jq` stay shell builtins (not coreutils).
 
 **ripgrep spike findings (#85):** builds and runs clean with **no source patches
 and no special flags** — the cleanest candidate yet. The default build uses the
@@ -110,7 +125,7 @@ See `clis/gh.toml` and `clis/gcx.toml`. Fields:
 - `[source]` `repo`, `ref` (pinned tag/commit), `dir` (local working copy)
 - `[build]`
   - Rust lane: `bin` (cargo binary; artifact is `<bin>.wasm`), optional
-    `cargo_flags`; see `clis/rg.toml`
+    `cargo_flags`, `[build.env]`; see `clis/rg.toml`, `clis/coreutils.toml`
   - Go lane: `package` (what to build), `vendor_patch` (script run after vendoring)
   - C lane: `system` (`single`|`cmake`); `single` uses `sources`/`cflags`/
     `link_flags`; `cmake` uses `cmake_flags` + `artifact`. `vendor_patch` runs
