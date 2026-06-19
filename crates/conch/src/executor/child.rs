@@ -10,13 +10,72 @@
 //! provides native async streams. This allows running Go programs compiled
 //! with the experimental wasip3 Go fork as well as standard wasip2 Rust CLIs.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
+use eryx_vfs::{
+    DirPerms, FilePerms, HybridVfsCtx, HybridVfsState, HybridVfsView, RealDir, VfsStorage,
+    add_hybrid_vfs_to_linker,
+};
 use tokio::sync::oneshot;
 use wasmtime::component::{Component, Linker, ResourceTable};
 use wasmtime::{Config, Engine, Store};
 use wasmtime_wasi::p2::pipe::{MemoryInputPipe, MemoryOutputPipe};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
+
+/// Filesystem template handed to a spawned child so it shares the shell's
+/// virtual filesystem (eryx-vfs storage + the same mounts), rather than a
+/// separate real-fs sandbox. The child rebuilds a [`HybridVfsCtx`] from this on
+/// its own thread; the storage is `Clone` (Arc-backed) so it shares data with
+/// the shell. Real mounts are re-opened per child from their host paths.
+pub struct ChildVfs<S> {
+    /// Shared VFS storage (same backing data as the shell).
+    pub storage: S,
+    /// Virtual preopens: `(guest_path, dir_perms, file_perms)`.
+    pub vfs_mounts: Vec<(String, DirPerms, FilePerms)>,
+    /// Real-fs preopens: `(guest_path, host_path, dir_perms, file_perms)`.
+    pub real_mounts: Vec<(String, PathBuf, DirPerms, FilePerms)>,
+}
+
+impl<S: Clone> Clone for ChildVfs<S> {
+    fn clone(&self) -> Self {
+        Self {
+            storage: self.storage.clone(),
+            vfs_mounts: self.vfs_mounts.clone(),
+            real_mounts: self.real_mounts.clone(),
+        }
+    }
+}
+
+impl<S> std::fmt::Debug for ChildVfs<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChildVfs")
+            .field("vfs_mounts", &self.vfs_mounts.len())
+            .field("real_mounts", &self.real_mounts.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<S: VfsStorage + Clone + 'static> ChildVfs<S> {
+    /// Build a fresh [`HybridVfsCtx`] sharing this storage, with the same mounts.
+    fn build_ctx(&self) -> HybridVfsCtx<S> {
+        let mut ctx = HybridVfsCtx::new(self.storage.clone());
+        for (path, dperms, fperms) in &self.vfs_mounts {
+            ctx.add_vfs_preopen(path, *dperms, *fperms);
+        }
+        for (guest, host, dperms, fperms) in &self.real_mounts {
+            match RealDir::open_ambient(host, *dperms, *fperms) {
+                Ok(dir) => ctx.add_real_preopen(guest, dir),
+                Err(e) => eprintln!(
+                    "[conch] child: failed to open real mount {} -> {}: {e}",
+                    host.display(),
+                    guest
+                ),
+            }
+        }
+        ctx
+    }
+}
 
 /// Result of running a child component.
 struct ChildResult {
@@ -29,7 +88,7 @@ struct ChildResult {
 ///
 /// Uses a batch approach: stdin data is accumulated, then the component
 /// runs to completion on `wait()`, producing stdout/stderr all at once.
-pub(crate) struct ChildProcess {
+pub(crate) struct ChildProcess<S: VfsStorage + Clone + 'static> {
     /// Engine for the child — separate from parent, with p3 async support.
     engine: Arc<Engine>,
     /// The component to run.
@@ -40,8 +99,9 @@ pub(crate) struct ChildProcess {
     env: Vec<(String, String)>,
     /// Working directory.
     cwd: String,
-    /// Sandbox root mounted at `/` for this child. `None` mounts the real `/`.
-    sandbox_root: Option<std::path::PathBuf>,
+    /// Filesystem the child sees: the shell's VFS (shared storage + mounts)
+    /// plus any real mounts (e.g. the `--sandbox-root` for certs).
+    vfs: ChildVfs<S>,
     /// Accumulated stdin data.
     pub stdin_buffer: Vec<u8>,
     /// Whether stdin has been closed (no more writes allowed).
@@ -55,17 +115,29 @@ pub(crate) struct ChildProcess {
 }
 
 /// WASI state for the child component's Store.
-struct ChildWasiState {
+///
+/// Holds both a [`WasiCtx`] (stdio/env/network, plus a real-fs preopen used by
+/// p3 components) and a [`HybridVfsCtx`] that shadows the p2 `wasi:filesystem`
+/// so p2 components see the shell's virtual filesystem.
+struct ChildWasiState<S: VfsStorage + Clone + 'static> {
     wasi: WasiCtx,
     table: ResourceTable,
+    hybrid: HybridVfsCtx<S>,
 }
 
-impl WasiView for ChildWasiState {
+impl<S: VfsStorage + Clone + 'static> WasiView for ChildWasiState<S> {
     fn ctx(&mut self) -> WasiCtxView<'_> {
         WasiCtxView {
             ctx: &mut self.wasi,
             table: &mut self.table,
         }
+    }
+}
+
+impl<S: VfsStorage + Clone + 'static> HybridVfsView for ChildWasiState<S> {
+    type Storage = S;
+    fn hybrid_vfs(&mut self) -> HybridVfsState<'_, Self::Storage> {
+        HybridVfsState::new(&mut self.hybrid, &mut self.table)
     }
 }
 
@@ -115,14 +187,14 @@ pub(crate) enum ComponentBytes<'a> {
 ///
 /// The component is compiled from raw WASM bytes for the child's
 /// p3-capable engine.
-pub(crate) fn spawn_child(
+pub(crate) fn spawn_child<S: VfsStorage + Clone + 'static>(
     bytes: ComponentBytes<'_>,
     cmd: &str,
     args: &[String],
     env: &[(String, String)],
     cwd: &str,
-    sandbox_root: Option<std::path::PathBuf>,
-) -> Result<ChildProcess, String> {
+    vfs: ChildVfs<S>,
+) -> Result<ChildProcess<S>, String> {
     let engine = child_engine()?;
 
     let child_component = match bytes {
@@ -144,7 +216,7 @@ pub(crate) fn spawn_child(
         args: full_args,
         env: env.to_vec(),
         cwd: cwd.to_string(),
-        sandbox_root,
+        vfs,
         stdin_buffer: Vec::new(),
         stdin_closed: false,
         result_rx: None,
@@ -153,7 +225,7 @@ pub(crate) fn spawn_child(
     })
 }
 
-impl ChildProcess {
+impl<S: VfsStorage + Clone + Send + Sync + 'static> ChildProcess<S> {
     /// Write data to the stdin buffer.
     pub fn write_stdin(&mut self, data: Vec<u8>) -> Result<u64, String> {
         if self.stdin_closed {
@@ -229,7 +301,7 @@ impl ChildProcess {
         let args = self.args.clone();
         let env = self.env.clone();
         let cwd = self.cwd.clone();
-        let sandbox_root = self.sandbox_root.clone();
+        let vfs = self.vfs.clone();
 
         let handle = std::thread::spawn(move || {
             let rt = match tokio::runtime::Builder::new_current_thread()
@@ -250,7 +322,7 @@ impl ChildProcess {
                 &args,
                 &env,
                 &cwd,
-                sandbox_root.as_deref(),
+                &vfs,
             ));
             if let Err(ref e) = result {
                 eprintln!("[child] error: {e}");
@@ -262,20 +334,26 @@ impl ChildProcess {
     }
 }
 
-/// Run the child component inside a WASI p3 environment.
-async fn run_child_component(
+/// Run the child component, sharing the shell's filesystem.
+///
+/// The child's p2 `wasi:filesystem` is backed by the shell's eryx-vfs (shared
+/// storage + the same mounts), so it sees the virtual filesystem (`/agent`,
+/// `/scratch`, …). The real mounts are also preopened into the [`WasiCtx`] so
+/// p3 components (which use a different `wasi:filesystem` snapshot, not yet
+/// VFS-backed) still get real-fs access (e.g. `gh` and its certs).
+async fn run_child_component<S: VfsStorage + Clone + 'static>(
     engine: &Engine,
     component: &Component,
     stdin_data: &[u8],
     args: &[String],
     _env: &[(String, String)],
     _cwd: &str,
-    sandbox_root: Option<&std::path::Path>,
+    vfs: &ChildVfs<S>,
 ) -> Result<ChildResult, String> {
     let stdout_pipe = MemoryOutputPipe::new(1024 * 1024); // 1MB
     let stderr_pipe = MemoryOutputPipe::new(1024 * 1024);
 
-    let make_state = |stdin_data: &[u8]| -> ChildWasiState {
+    let make_state = |stdin_data: &[u8]| -> ChildWasiState<S> {
         let stdin_pipe = MemoryInputPipe::new(stdin_data.to_vec());
         let mut builder = WasiCtxBuilder::new();
         builder
@@ -292,32 +370,37 @@ async fn run_child_component(
         builder.allow_ip_name_lookup(true);
         builder.env("SSL_CERT_FILE", "/etc/ssl/certs/ca-certificates.crt");
 
-        // Mount a sandbox root at `/`. A configured root typically holds
-        // symlink-free copies of system files (resolv.conf, TLS certs, command
-        // config). When unset — or set to a path that doesn't exist — fall back
-        // to the host's real `/`. Multiple preopens cause handle issues with
-        // wasip3, so we mount exactly one.
-        let real_root = std::path::Path::new("/");
-        let root = match sandbox_root {
-            Some(p) if p.exists() => p,
-            Some(p) => {
-                eprintln!(
-                    "[conch] sandbox root {} does not exist; mounting real / instead",
-                    p.display()
+        // Real-fs preopens for the p3 path (p2 uses the hybrid VFS below, which
+        // shadows wasi:filesystem). Existing dirs only.
+        let mut real_preopened = 0usize;
+        for (guest, host, _d, _f) in &vfs.real_mounts {
+            if host.exists() {
+                let _ = builder.preopened_dir(
+                    host,
+                    guest,
+                    wasmtime_wasi::DirPerms::all(),
+                    wasmtime_wasi::FilePerms::all(),
                 );
-                real_root
+                real_preopened += 1;
             }
-            None => real_root,
-        };
-        let _ = builder.preopened_dir(
-            root,
-            "/",
-            wasmtime_wasi::DirPerms::all(),
-            wasmtime_wasi::FilePerms::all(),
-        );
+        }
+        // Fallback for p3 components (e.g. gh) when no real mount is configured:
+        // mount the host's real `/`, matching the pre-VFS behaviour so they keep
+        // filesystem access (config, certs). p2 components ignore this — they use
+        // the shadowed hybrid VFS above.
+        if real_preopened == 0 {
+            let _ = builder.preopened_dir(
+                "/",
+                "/",
+                wasmtime_wasi::DirPerms::all(),
+                wasmtime_wasi::FilePerms::all(),
+            );
+        }
+
         ChildWasiState {
             wasi: builder.build(),
             table: ResourceTable::new(),
+            hybrid: vfs.build_ctx(),
         }
     };
 
@@ -337,19 +420,25 @@ async fn run_child_component(
 ///
 /// Mirrors the approach used by the wasmtime CLI: add both p2 and p3
 /// to the linker, instantiate once, then try Command::new for p3 first.
-async fn run_with_linker(
+async fn run_with_linker<S: VfsStorage + Clone + 'static>(
     engine: &Engine,
-    state: ChildWasiState,
+    state: ChildWasiState<S>,
     component: &Component,
 ) -> Result<i32, String> {
     let mut store = Store::new(engine, state);
-    let mut linker = Linker::<ChildWasiState>::new(engine);
+    let mut linker = Linker::<ChildWasiState<S>>::new(engine);
 
     // Add both p2 and p3 WASI interfaces (same as wasmtime CLI with -S p3)
     wasmtime_wasi::p2::add_to_linker_async(&mut linker)
         .map_err(|e| format!("failed to add WASI p2 to linker: {e}"))?;
     wasmtime_wasi::p3::add_to_linker(&mut linker)
         .map_err(|e| format!("failed to add WASI p3 to linker: {e}"))?;
+    // Shadow the p2 `wasi:filesystem` with the shell's VFS so p2 components see
+    // the virtual filesystem (same pattern the shell uses for itself).
+    linker.allow_shadowing(true);
+    add_hybrid_vfs_to_linker(&mut linker)
+        .map_err(|e| format!("failed to add hybrid VFS to child linker: {e}"))?;
+    linker.allow_shadowing(false);
 
     // Instantiate the component once
     let instance = linker

@@ -57,6 +57,10 @@ pub use executor::ComponentShellExecutor;
 #[cfg(feature = "embedded-shell")]
 pub use executor::ShellInstance;
 
+// Filesystem template for spawned children (share the shell's VFS).
+#[cfg(feature = "embedded-shell")]
+pub use executor::ChildVfs;
+
 // Tool handler types (for tool invocation from shell scripts)
 pub use executor::{ToolHandler, ToolRequest, ToolResult};
 

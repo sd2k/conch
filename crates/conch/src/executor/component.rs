@@ -146,8 +146,11 @@ pub struct HybridComponentState<S: VfsStorage + Clone + 'static> {
     tool_handler: Option<Arc<dyn ToolHandler>>,
     /// Component registry for subprocess spawning.
     component_registry: Option<Arc<ComponentRegistry>>,
+    /// Filesystem template for spawned children: shares this shell's VFS
+    /// (storage + mounts) so child components see the same virtual filesystem.
+    child_vfs: child::ChildVfs<S>,
     /// Active child processes, keyed by resource rep.
-    children: std::collections::HashMap<u32, child::ChildProcess>,
+    children: std::collections::HashMap<u32, child::ChildProcess<S>>,
     /// Next child process ID.
     next_child_id: u32,
 }
@@ -161,6 +164,7 @@ impl<S: VfsStorage + Clone + 'static> HybridComponentState<S> {
         hybrid_vfs_ctx: HybridVfsCtx<S>,
         tool_handler: Option<Arc<dyn ToolHandler>>,
         component_registry: Option<Arc<ComponentRegistry>>,
+        child_vfs: child::ChildVfs<S>,
     ) -> Self {
         let stdout_pipe = MemoryOutputPipe::new(output_capacity);
         let stderr_pipe = MemoryOutputPipe::new(output_capacity);
@@ -181,6 +185,7 @@ impl<S: VfsStorage + Clone + 'static> HybridComponentState<S> {
             hybrid_vfs_ctx,
             tool_handler,
             component_registry,
+            child_vfs,
             children: std::collections::HashMap::new(),
             next_child_id: 0,
         }
@@ -255,13 +260,23 @@ impl<S: VfsStorage + Clone + 'static> wit::shell::process::HostChild for HybridC
             .sandbox_root(&cmd)
             .map(std::path::Path::to_path_buf);
 
-        let child_process =
-            child::spawn_child(component_bytes, &cmd, &args, &env, &cwd, sandbox_root).map_err(
-                |e| {
-                    eprintln!("[conch] spawn_child({cmd}) failed: {e}");
-                    ProcessError::SpawnFailed
-                },
-            )?;
+        // The child shares the shell's VFS (shared storage + mounts); a
+        // `--sandbox-root` becomes an additional real mount at `/` (certs etc.).
+        let mut child_vfs = self.child_vfs.clone();
+        if let Some(root) = sandbox_root {
+            child_vfs.real_mounts.push((
+                "/".to_string(),
+                root,
+                eryx_vfs::DirPerms::all(),
+                eryx_vfs::FilePerms::all(),
+            ));
+        }
+
+        let child_process = child::spawn_child(component_bytes, &cmd, &args, &env, &cwd, child_vfs)
+            .map_err(|e| {
+                eprintln!("[conch] spawn_child({cmd}) failed: {e}");
+                ProcessError::SpawnFailed
+            })?;
 
         let id = self.next_child_id;
         self.next_child_id += 1;
@@ -493,6 +508,7 @@ impl ComponentShellExecutor {
         limits: &ResourceLimits,
         hybrid_ctx: HybridVfsCtx<S>,
         tool_handler: Option<Arc<dyn ToolHandler>>,
+        child_vfs: child::ChildVfs<S>,
     ) -> Result<ShellInstance<S>, RuntimeError> {
         ShellInstance::new(
             self.engine.clone(),
@@ -501,6 +517,7 @@ impl ComponentShellExecutor {
             hybrid_ctx,
             tool_handler,
             None,
+            child_vfs,
         )
         .await
     }
@@ -513,6 +530,7 @@ impl ComponentShellExecutor {
         hybrid_ctx: HybridVfsCtx<S>,
         tool_handler: Option<Arc<dyn ToolHandler>>,
         registry: Arc<ComponentRegistry>,
+        child_vfs: child::ChildVfs<S>,
     ) -> Result<ShellInstance<S>, RuntimeError> {
         ShellInstance::new(
             self.engine.clone(),
@@ -521,6 +539,7 @@ impl ComponentShellExecutor {
             hybrid_ctx,
             tool_handler,
             Some(registry),
+            child_vfs,
         )
         .await
     }
@@ -560,6 +579,7 @@ impl<S: VfsStorage + Clone + 'static> ShellInstance<S> {
         hybrid_ctx: HybridVfsCtx<S>,
         tool_handler: Option<Arc<dyn ToolHandler>>,
         component_registry: Option<Arc<ComponentRegistry>>,
+        child_vfs: child::ChildVfs<S>,
     ) -> Result<Self, RuntimeError> {
         // Create state with hybrid VFS context
         let state = HybridComponentState::new(
@@ -568,6 +588,7 @@ impl<S: VfsStorage + Clone + 'static> ShellInstance<S> {
             hybrid_ctx,
             tool_handler,
             component_registry,
+            child_vfs,
         );
 
         let mut store = Store::new(&engine, state);
@@ -771,11 +792,17 @@ mod tests {
         let limits = ResourceLimits::default();
 
         let storage = ArcStorage::new(Arc::new(InMemoryStorage::new()));
-        let mut hybrid_ctx = HybridVfsCtx::new(storage);
+        let mut hybrid_ctx = HybridVfsCtx::new(storage.clone());
         hybrid_ctx.add_vfs_preopen("/scratch", DirPerms::all(), FilePerms::all());
 
+        let child_vfs = crate::executor::ChildVfs {
+            storage,
+            vfs_mounts: vec![("/scratch".to_string(), DirPerms::all(), FilePerms::all())],
+            real_mounts: vec![],
+        };
+
         executor
-            .create_instance(&limits, hybrid_ctx, None)
+            .create_instance(&limits, hybrid_ctx, None, child_vfs)
             .await
             .expect("Failed to create instance")
     }

@@ -18,6 +18,8 @@ pub use component::{ComponentShellExecutor, ToolHandler, ToolRequest, ToolResult
 pub use registry::{ComponentRegistry, SharedRegistry};
 
 #[cfg(feature = "embedded-shell")]
+pub use child::ChildVfs;
+#[cfg(feature = "embedded-shell")]
 pub use component::ShellInstance;
 
 /// Enable wasmtime's on-disk compilation cache on the given config.
