@@ -359,15 +359,15 @@ async fn run_with_linker(
 
     // Try p3 Command first (like wasmtime CLI does)
     if let Ok(command) = wasmtime_wasi::p3::bindings::Command::new(&mut store, &instance) {
-        let result = store
+        let run_result = store
             .run_concurrent(async |store| command.wasi_cli_run().call_run(store).await)
             .await
-            .map_err(|e| format!("event loop failed: {e:?}"))?
-            .map_err(|e| format!("component execution failed: {e:?}"))?;
-        return Ok(match result {
-            Ok(()) => 0,
-            Err(()) => 1,
-        });
+            .map_err(|e| format!("event loop failed: {e:?}"))?;
+        return match run_result {
+            Ok(Ok(())) => Ok(0),
+            Ok(Err(())) => Ok(1),
+            Err(e) => exit_code_or_failure(e),
+        };
     }
 
     // Fall back to p2 Command
@@ -377,6 +377,17 @@ async fn run_with_linker(
     match command.wasi_cli_run().call_run(&mut store).await {
         Ok(Ok(())) => Ok(0),
         Ok(Err(())) => Ok(1),
-        Err(e) => Err(format!("component execution failed: {e:?}")),
+        Err(e) => exit_code_or_failure(e),
+    }
+}
+
+/// Map an error from `call_run` to an exit code. A guest that calls
+/// `proc_exit`/`wasi:cli/exit` (e.g. uutils' explicit `std::process::exit`)
+/// surfaces as a `wasmtime_wasi::I32Exit` rather than a clean return — that's a
+/// normal exit, so use its status (0 = success). Anything else is a real failure.
+fn exit_code_or_failure(e: wasmtime::Error) -> Result<i32, String> {
+    match e.downcast_ref::<wasmtime_wasi::I32Exit>() {
+        Some(exit) => Ok(exit.0),
+        None => Err(format!("component execution failed: {e:?}")),
     }
 }
