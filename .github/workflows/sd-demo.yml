@@ -1,0 +1,90 @@
+name: sd demo (Rust lane)
+
+# Builds sd (`sd`, a `sed` replacement) as a wasip2 component via the Rust lane
+# (cargo --target wasm32-wasip2) and runs it through conch end-to-end:
+#   - M1: `sd --version`
+#   - M2: find & replace in a pipeline (incl. regex capture-group swap)
+# Reproducible-in-CI proof for the Rust lane (issue #87, epic #84).
+
+on:
+  workflow_dispatch: {}
+  pull_request:
+    branches: [main]
+    paths:
+      - "clis/sd.toml"
+      - "clis/patches/patch-sd-wasip2.sh"
+      - "crates/conch-build/**"
+      - "crates/conch/**"
+      - "crates/conch-cli/**"
+      - "crates/conch-shell/**"
+      - "mise.toml"
+      - ".github/workflows/sd-demo.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  sd-demo:
+    name: Build sd & run in conch
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Configure Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install mise toolchains
+        uses: jdx/mise-action@v3
+        with:
+          cache: false
+
+      - name: Add wasm32-wasip2 target
+        run: rustup target add wasm32-wasip2
+
+      - name: Clone sd source (pinned)
+        run: mise run fetch-sd
+
+      - name: Build the embedded shell (wasm + cwasm)
+        run: mise run compile-shell-cwasm
+
+      - name: Build the sd component
+        run: mise run build-cli -- sd
+
+      - name: Run sd through conch
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/conch-cmds
+          cp scratch/sd-component/component.wasm /tmp/conch-cmds/sd.wasm
+
+          echo "--- M1: sd --version ---"
+          ver="$(cargo run -q -p conch-cli -- --commands-dir /tmp/conch-cmds -c 'sd --version')"
+          echo "$ver"
+          echo "$ver" | grep -q 'sd 1.0.0' || {
+            echo "::error::sd --version did not run as expected through conch"
+            exit 1
+          }
+
+          # Feed sd via the `echo` shell builtin so the demo needs only `sd`
+          # registered — cat/etc. are spawned coreutils (not builtins) post-#94.
+          echo "--- M2a: echo hello world | sd world there ---"
+          out="$(cargo run -q -p conch-cli -- --commands-dir /tmp/conch-cmds -c 'echo hello world | sd world there')"
+          echo "$out"
+          echo "$out" | grep -qx 'hello there' || {
+            echo "::error::sd replace did not produce the expected output through conch"
+            exit 1
+          }
+
+          echo "--- M2b: echo ... | sd (regex capture swap) ---"
+          swap="$(cargo run -q -p conch-cli -- --commands-dir /tmp/conch-cmds -c "echo hello world | sd '(\w+) (\w+)' '\$2 \$1'")"
+          echo "$swap"
+          echo "$swap" | grep -qx 'world hello' || {
+            echo "::error::sd regex capture-group swap did not work through conch"
+            exit 1
+          }
+          echo "sd ran successfully in conch (M1 + M2) ✅"
