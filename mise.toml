@@ -254,6 +254,21 @@ echo "Cloning ripgrep @ $REF"
 git clone --depth 1 --branch "$REF" https://github.com/BurntSushi/ripgrep.git "$DIR"
 """
 
+[tasks.fetch-sd]
+description = "Clone the pinned sd source into scratch/sd"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+DIR=scratch/sd
+REF=v1.1.0
+if [ -d "$DIR/.git" ]; then
+    echo "sd source already present ($(git -C "$DIR" describe --tags 2>/dev/null || echo unknown))"
+    exit 0
+fi
+echo "Cloning sd @ $REF"
+git clone --depth 1 --branch "$REF" https://github.com/chmln/sd.git "$DIR"
+"""
+
 [tasks.fetch-curl]
 description = "Clone the pinned curl source into scratch/curl"
 run = """
@@ -454,6 +469,26 @@ echo "--- sort /data/fruit.txt ---"
 cargo run -q -p conch-cli -- --commands-dir /tmp/conch-cmds --sandbox-root /tmp/uu-root -c "sort /data/fruit.txt"
 echo "--- head -n 2 /data/nums.txt | wc -l ---"
 cargo run -q -p conch-cli -- --commands-dir /tmp/conch-cmds --sandbox-root /tmp/uu-root -c "head -n 2 /data/nums.txt | wc -l"
+"""
+
+[tasks.demo-sd]
+description = "Demo: build sd (Rust lane) and run find & replace through conch (#87)"
+depends = ["wasm-target", "fetch-sd", "wasm-build", "compile-shell-cwasm", "build-test-cmd"]
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+cargo run -q -p conch-build -- sd
+mkdir -p /tmp/conch-cmds
+cp scratch/sd-component/component.wasm /tmp/conch-cmds/sd.wasm
+cp target/wasm32-wasip2/release/conch-test-cmd.wasm /tmp/conch-cmds/upper.wasm
+# Feed sd via the `echo` shell builtin: only sd + upper need registering
+# (cat/etc. are spawned coreutils, not builtins, post-#94).
+echo "--- echo hello world | sd world there ---"
+cargo run -q -p conch-cli -- --commands-dir /tmp/conch-cmds \
+    -c "echo hello world | sd world there"
+echo "--- echo ... | sd (regex swap) | upper ---"
+cargo run -q -p conch-cli -- --commands-dir /tmp/conch-cmds \
+    -c "echo hello world | sd '(\\w+) (\\w+)' '\\$2 \\$1' | upper"
 """
 
 [tasks.demo-curl]
