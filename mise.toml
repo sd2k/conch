@@ -1,5 +1,5 @@
 # Enable monorepo mode for subdirectory tasks
-experimental_monorepo_root = true
+monorepo_root = true
 
 [monorepo]
 config_roots = ["js"]
