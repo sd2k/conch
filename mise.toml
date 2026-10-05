@@ -1,5 +1,5 @@
 # Enable monorepo mode for subdirectory tasks
-experimental_monorepo_root = true
+monorepo_root = true
 
 [monorepo]
 config_roots = ["js"]
@@ -81,14 +81,22 @@ run = "rustup target add wasm32-wasip2"
 [tasks.wasm-build]
 description = "Build WASM shell component (wasip2)"
 depends = ["wasm-target"]
-sources = ["crates/conch-shell/src/**/*.rs", "crates/conch-shell/Cargo.toml", "crates/conch-shell/wit/**/*.wit"]
+sources = [
+  "crates/conch-shell/src/**/*.rs",
+  "crates/conch-shell/Cargo.toml",
+  "crates/conch-shell/wit/**/*.wit",
+]
 outputs = ["target/wasm32-wasip2/release/conch_shell.wasm"]
 run = "cargo build -p conch-shell --target wasm32-wasip2 --release"
 
 [tasks.wasm-build-small]
 description = "Build WASM shell component (wasip2, size-optimized for JS bindings)"
 depends = ["wasm-target"]
-sources = ["crates/conch-shell/src/**/*.rs", "crates/conch-shell/Cargo.toml", "crates/conch-shell/wit/**/*.wit"]
+sources = [
+  "crates/conch-shell/src/**/*.rs",
+  "crates/conch-shell/Cargo.toml",
+  "crates/conch-shell/wit/**/*.wit",
+]
 outputs = ["target/wasm32-wasip2/release-wasm/conch_shell.wasm"]
 run = "cargo build -p conch-shell --target wasm32-wasip2 --profile release-wasm"
 
@@ -405,17 +413,33 @@ run = "cargo test --test subprocess -p conch --features embedded-shell"
 
 [tasks.demo]
 description = "Demo: echo hello | upper"
-depends = ["wasm-build", "build-test-cmd", "compile-shell-cwasm", "setup-commands-dir"]
+depends = [
+  "wasm-build",
+  "build-test-cmd",
+  "compile-shell-cwasm",
+  "setup-commands-dir",
+]
 run = 'cargo run -p conch-cli -- --commands-dir /tmp/conch-cmds -c "echo hello world | upper"'
 
 [tasks.demo-gh]
 description = "Demo: gh pr list | upper (needs setup-gh-sandbox first)"
-depends = ["wasm-build", "compile-shell-cwasm", "setup-commands-dir", "setup-gh-sandbox"]
+depends = [
+  "wasm-build",
+  "compile-shell-cwasm",
+  "setup-commands-dir",
+  "setup-gh-sandbox",
+]
 run = 'cargo run -p conch-cli -- --commands-dir /tmp/conch-cmds --sandbox-root /tmp/gh-root -c "gh pr list -R cli/cli --limit 3 | upper"'
 
 [tasks.demo-sqlite]
 description = "Demo: build sqlite3 (C lane) and run a query through conch (#52)"
-depends = ["ensure-wasi-sdk", "fetch-sqlite", "wasm-build", "compile-shell-cwasm", "build-test-cmd"]
+depends = [
+  "ensure-wasi-sdk",
+  "fetch-sqlite",
+  "wasm-build",
+  "compile-shell-cwasm",
+  "build-test-cmd",
+]
 run = """
 #!/usr/bin/env bash
 set -euo pipefail
@@ -431,7 +455,13 @@ cargo run -q -p conch-cli -- --commands-dir /tmp/conch-cmds \
 
 [tasks.demo-ripgrep]
 description = "Demo: build ripgrep (Rust lane) and search a mounted dir through conch (#85)"
-depends = ["wasm-target", "fetch-ripgrep", "wasm-build", "compile-shell-cwasm", "build-test-cmd"]
+depends = [
+  "wasm-target",
+  "fetch-ripgrep",
+  "wasm-build",
+  "compile-shell-cwasm",
+  "build-test-cmd",
+]
 run = """
 #!/usr/bin/env bash
 set -euo pipefail
@@ -451,7 +481,12 @@ cargo run -q -p conch-cli -- --commands-dir /tmp/conch-cmds --sandbox-root /tmp/
 
 [tasks.demo-coreutils]
 description = "Demo: build coreutils (uutils, Rust lane) and run utils through conch (#86)"
-depends = ["wasm-target", "fetch-coreutils", "wasm-build", "compile-shell-cwasm"]
+depends = [
+  "wasm-target",
+  "fetch-coreutils",
+  "wasm-build",
+  "compile-shell-cwasm",
+]
 run = """
 #!/usr/bin/env bash
 set -euo pipefail
@@ -473,7 +508,13 @@ cargo run -q -p conch-cli -- --commands-dir /tmp/conch-cmds --sandbox-root /tmp/
 
 [tasks.demo-sd]
 description = "Demo: build sd (Rust lane) and run find & replace through conch (#87)"
-depends = ["wasm-target", "fetch-sd", "wasm-build", "compile-shell-cwasm", "build-test-cmd"]
+depends = [
+  "wasm-target",
+  "fetch-sd",
+  "wasm-build",
+  "compile-shell-cwasm",
+  "build-test-cmd",
+]
 run = """
 #!/usr/bin/env bash
 set -euo pipefail
@@ -493,7 +534,13 @@ cargo run -q -p conch-cli -- --commands-dir /tmp/conch-cmds \
 
 [tasks.demo-curl]
 description = "Demo: build curl + mbedTLS (C/CMake lane) and fetch HTTPS through conch (#79)"
-depends = ["ensure-wasi-sdk", "fetch-curl", "fetch-mbedtls", "wasm-build", "compile-shell-cwasm"]
+depends = [
+  "ensure-wasi-sdk",
+  "fetch-curl",
+  "fetch-mbedtls",
+  "wasm-build",
+  "compile-shell-cwasm",
+]
 run = """
 #!/usr/bin/env bash
 set -euo pipefail
