@@ -14,7 +14,7 @@ rust-version = "1.92"
 # Released on crates.io; wasmtime-wasi's `p3` feature pulls in component-model-async.
 # Floats within 44.x to unify with eryx-vfs's `^44` requirement.
 wasmtime = { version = "44", features = ["component-model", "component-model-async", "stack-switching", "async"] }
-wasmtime-wasi = { version = "44", features = ["p3"] }
+wasmtime-wasi = { version = "45", features = ["p3"] }
 wasmtime-wasi-io = "44"
 
 # VFS for WASI filesystem shadowing (released crate; tracks wasmtime 44).
