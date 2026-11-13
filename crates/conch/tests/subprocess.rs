@@ -433,3 +433,34 @@ async fn test_spawned_cat_preserves_final_partial_line() {
         );
     }
 }
+
+/// A child gets no more than the shell that spawned it: the shell's exported
+/// variables, not the host's environment, and no network.
+#[tokio::test]
+async fn test_subprocess_inherits_only_the_shells_sandbox() {
+    let executor = ComponentShellExecutor::embedded().expect("Failed to create executor");
+    let mut registry = ComponentRegistry::new();
+    registry.register_wasm("probe", load_test_cmd_bytes());
+    let mut instance = create_shell_with_registry(&executor, Arc::new(registry)).await;
+
+    let host_var = std::env::vars()
+        .map(|(k, _)| k)
+        .find(|k| k == "PATH" || k == "HOME")
+        .expect("test host has PATH or HOME");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let script =
+        format!("probe env {host_var}; export GREETING=hi; probe env GREETING; probe net {addr}");
+    let result = instance
+        .execute(&script, &limits())
+        .await
+        .expect("execute failed");
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert_eq!(
+        stdout,
+        "<unset>\nhi\nblocked\n",
+        "stderr: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
