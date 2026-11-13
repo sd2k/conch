@@ -30,25 +30,25 @@ Tasks are defined in `js/mise.toml` using mise's monorepo feature. You can run t
 From project root:
 ```bash
 # Install jco
-MISE_EXPERIMENTAL=1 mise run //js:deps
+mise run //js:deps
 
 # Build the WASM component and transpile to JS
-MISE_EXPERIMENTAL=1 mise run //js:build
+mise run //js:build
 
 # Run tests
-MISE_EXPERIMENTAL=1 mise run //js:test
+mise run //js:test
 
 # Clean build artifacts
-MISE_EXPERIMENTAL=1 mise run //js:clean
+mise run //js:clean
 ```
 
 Or from within `js/`:
 ```bash
 cd js
-MISE_EXPERIMENTAL=1 mise run :deps
-MISE_EXPERIMENTAL=1 mise run :build
-MISE_EXPERIMENTAL=1 mise run :test
-MISE_EXPERIMENTAL=1 mise run :clean
+mise run :deps
+mise run :build
+mise run :test
+mise run :clean
 ```
 
 ## Directory Structure
@@ -189,7 +189,7 @@ This package works out of the box in both browsers and Node.js with the same beh
 ## Publishing
 
 ```bash
-MISE_EXPERIMENTAL=1 mise run //js:publish
+mise run //js:publish
 ```
 
 This publishes the `@bsull/conch` package to npm.

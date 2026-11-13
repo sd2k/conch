@@ -12,7 +12,6 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  MISE_EXPERIMENTAL: 1
   RUST_BACKTRACE: 1
 
 jobs:

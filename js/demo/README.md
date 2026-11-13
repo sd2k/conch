@@ -17,8 +17,8 @@ From the repo root (uses mise's monorepo tasks; builds the WASM + transpiles
 first, then starts Vite):
 
 ```bash
-MISE_EXPERIMENTAL=1 mise run //js:demo          # dev server
-MISE_EXPERIMENTAL=1 mise run //js:demo-build     # production build to dist/
+mise run //js:demo          # dev server
+mise run //js:demo-build     # production build to dist/
 ```
 
 Or directly with npm (requires `//js:build` to have produced the

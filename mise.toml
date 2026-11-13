@@ -1,3 +1,6 @@
+# monorepo_root (non-experimental) needs mise >= 2026.7.10
+min_version = "2026.7.10"
+
 # Enable monorepo mode for subdirectory tasks
 monorepo_root = true
 

@@ -11,7 +11,6 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  MISE_EXPERIMENTAL: 1
 
 permissions: {}
 
@@ -55,7 +54,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: jdx/mise-action@v2
+      - uses: jdx/mise-action@v3
 
       - name: Build and test JavaScript bindings
         working-directory: js
