@@ -19,6 +19,11 @@ runs:
       # `--disable-strategies compile` forces a prebuilt binary and prevents
       # binstall from silently falling back to a source build, which fails the
       # "must use --locked" tripwire in recent cargo-nextest releases.
+      # The token keeps binstall's GitHub release lookup authenticated; without
+      # it, six jobs share the anonymous rate limit and a miss falls through to
+      # QuickInstall, which can time out and fail the job.
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
       run: cargo binstall --no-confirm --force --disable-strategies compile cargo-nextest
 
     - name: Install mise
