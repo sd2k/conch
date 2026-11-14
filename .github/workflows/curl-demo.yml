@@ -96,7 +96,7 @@ jobs:
           }
 
           echo "--- M2: curl -sSI http://example.com ---"
-          hdrs="$(cargo run -q -p conch-cli -- --commands-dir /tmp/conch-cmds -c 'curl -sSI http://example.com')"
+          hdrs="$(cargo run -q -p conch-cli -- --commands-dir /tmp/conch-cmds --allow-network curl -c 'curl -sSI http://example.com')"
           echo "$hdrs"
           echo "$hdrs" | grep -qiE '^HTTP/.* 200' || {
             echo "::error::curl plaintext HTTP did not return 200 through conch"
@@ -107,7 +107,7 @@ jobs:
           CERT=$(readlink -f /etc/ssl/certs/ca-certificates.crt)
           mkdir -p /tmp/curl-tls-root/etc/ssl/certs
           cp "$CERT" /tmp/curl-tls-root/etc/ssl/certs/ca-certificates.crt
-          tls="$(cargo run -q -p conch-cli -- --commands-dir /tmp/conch-cmds --sandbox-root /tmp/curl-tls-root \
+          tls="$(cargo run -q -p conch-cli -- --commands-dir /tmp/conch-cmds --sandbox-root /tmp/curl-tls-root --allow-network curl \
             -c 'curl -sSI --cacert /etc/ssl/certs/ca-certificates.crt https://example.com')"
           echo "$tls"
           echo "$tls" | grep -qiE '^HTTP/.* 200' || {
