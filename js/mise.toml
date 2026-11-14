@@ -1,10 +1,35 @@
 [tools]
 node = "24"
+
 # Pinned for reproducible transpile output. jco emits an invalid `const`
 # reassignment (and a `for...in` over an array) in the dead-code _liftFlatRecord
 # helper; rolldown rejects the const reassignment when bundling the demo, so the
 # patch-js task rewrites both. Keep this pin in sync with those patches.
-"npm:@bytecodealliance/jco" = "1.16.1"
+# trust_policy_excludes: mise's aube npm backend has a "no-downgrade" trust gate.
+# jco's transitive dep @oxc-parser/binding-*@0.76.0 was published without the
+# provenance attestation earlier releases had (oxc restored it in 0.90.0+), so
+# the gate refuses to install it. Bumping jco does NOT help: every componentize-js
+# release still requires oxc-parser ^0.76.0. Remove once jco pulls a signed oxc.
+# See https://aube.jdx.dev/security#trust-policy
+[tools."npm:@bytecodealliance/jco"]
+version = "1.16.1"
+trust_policy_excludes = [
+  "@oxc-parser/binding-android-arm64@0.76.0",
+  "@oxc-parser/binding-darwin-arm64@0.76.0",
+  "@oxc-parser/binding-darwin-x64@0.76.0",
+  "@oxc-parser/binding-freebsd-x64@0.76.0",
+  "@oxc-parser/binding-linux-arm-gnueabihf@0.76.0",
+  "@oxc-parser/binding-linux-arm-musleabihf@0.76.0",
+  "@oxc-parser/binding-linux-arm64-gnu@0.76.0",
+  "@oxc-parser/binding-linux-arm64-musl@0.76.0",
+  "@oxc-parser/binding-linux-riscv64-gnu@0.76.0",
+  "@oxc-parser/binding-linux-s390x-gnu@0.76.0",
+  "@oxc-parser/binding-linux-x64-gnu@0.76.0",
+  "@oxc-parser/binding-linux-x64-musl@0.76.0",
+  "@oxc-parser/binding-wasm32-wasi@0.76.0",
+  "@oxc-parser/binding-win32-arm64-msvc@0.76.0",
+  "@oxc-parser/binding-win32-x64-msvc@0.76.0",
+]
 
 # =============================================================================
 # JavaScript bindings tasks (browser/Node.js via jco)
