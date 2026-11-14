@@ -48,12 +48,27 @@ pub(crate) fn compile_cwasm(
     let cwasm = output_dir.join(format!("{}.cwasm", manifest.name));
     let cwasm_s = path_str(&cwasm)?;
     let component_s = path_str(component)?;
-    let mut args: Vec<&str> = vec!["compile"];
+    // An explicit target stops Cranelift from baking in the build machine's
+    // CPU features, so the cwasm also loads on other hosts (CI builds it on
+    // one runner and runs it on another).
+    let target = host_triple();
+    let mut args: Vec<&str> = vec!["compile", "--target", &target];
     args.extend(manifest.cwasm.flags.iter().map(String::as_str));
     args.extend([component_s.as_str(), "-o", cwasm_s.as_str()]);
     run("wasmtime", &args, repo_root, &[])?;
     eprintln!("  → {}", cwasm.display());
     Ok(())
+}
+
+/// The target triple of the machine running the build, for `wasmtime compile`.
+fn host_triple() -> String {
+    use std::env::consts::{ARCH, OS};
+    match OS {
+        "linux" => format!("{ARCH}-unknown-linux-gnu"),
+        "macos" => format!("{ARCH}-apple-darwin"),
+        "windows" => format!("{ARCH}-pc-windows-msvc"),
+        os => format!("{ARCH}-unknown-{os}"),
+    }
 }
 
 /// Run a subprocess, returning an error if it exits non-zero.
