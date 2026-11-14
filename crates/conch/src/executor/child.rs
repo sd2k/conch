@@ -97,11 +97,11 @@ pub(crate) struct ChildProcess<S: VfsStorage + Clone + 'static> {
     args: Vec<String>,
     /// Environment variables.
     env: Vec<(String, String)>,
-    /// Working directory.
-    cwd: String,
     /// Filesystem the child sees: the shell's VFS (shared storage + mounts)
     /// plus any real mounts (e.g. the `--sandbox-root` for certs).
     vfs: ChildVfs<S>,
+    /// Whether the command was granted the host network.
+    network: bool,
     /// Accumulated stdin data.
     pub stdin_buffer: Vec<u8>,
     /// Whether stdin has been closed (no more writes allowed).
@@ -192,8 +192,8 @@ pub(crate) fn spawn_child<S: VfsStorage + Clone + 'static>(
     cmd: &str,
     args: &[String],
     env: &[(String, String)],
-    cwd: &str,
     vfs: ChildVfs<S>,
+    network: bool,
 ) -> Result<ChildProcess<S>, String> {
     let engine = child_engine()?;
 
@@ -215,8 +215,8 @@ pub(crate) fn spawn_child<S: VfsStorage + Clone + 'static>(
         component: child_component,
         args: full_args,
         env: env.to_vec(),
-        cwd: cwd.to_string(),
         vfs,
+        network,
         stdin_buffer: Vec::new(),
         stdin_closed: false,
         result_rx: None,
@@ -300,8 +300,8 @@ impl<S: VfsStorage + Clone + Send + Sync + 'static> ChildProcess<S> {
         let stdin_data = std::mem::take(&mut self.stdin_buffer);
         let args = self.args.clone();
         let env = self.env.clone();
-        let cwd = self.cwd.clone();
         let vfs = self.vfs.clone();
+        let network = self.network;
 
         let handle = std::thread::spawn(move || {
             let rt = match tokio::runtime::Builder::new_current_thread()
@@ -321,8 +321,8 @@ impl<S: VfsStorage + Clone + Send + Sync + 'static> ChildProcess<S> {
                 &stdin_data,
                 &args,
                 &env,
-                &cwd,
                 &vfs,
+                network,
             ));
             if let Err(ref e) = result {
                 eprintln!("[child] error: {e}");
@@ -347,8 +347,8 @@ async fn run_child_component<S: VfsStorage + Clone + 'static>(
     stdin_data: &[u8],
     args: &[String],
     env: &[(String, String)],
-    _cwd: &str,
     vfs: &ChildVfs<S>,
+    network: bool,
 ) -> Result<ChildResult, String> {
     let stdout_pipe = MemoryOutputPipe::new(1024 * 1024); // 1MB
     let stderr_pipe = MemoryOutputPipe::new(1024 * 1024);
@@ -366,8 +366,13 @@ async fn run_child_component<S: VfsStorage + Clone + 'static>(
         }
         // A child gets no more than the shell that spawned it: the shell's
         // exported variables (not the host's environment) and no network,
-        // since the shell itself has neither host env nor sockets.
+        // since the shell itself has neither host env nor sockets. The one
+        // exception is network for commands the registry explicitly allows.
         builder.envs(env);
+        if network {
+            builder.inherit_network();
+            builder.allow_ip_name_lookup(true);
+        }
 
         // Real-fs preopens for the p3 path (p2 uses the hybrid VFS below, which
         // shadows wasi:filesystem), with each mount's own permissions. Only the

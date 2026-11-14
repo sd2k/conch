@@ -464,3 +464,28 @@ async fn test_subprocess_inherits_only_the_shells_sandbox() {
         String::from_utf8_lossy(&result.stderr)
     );
 }
+
+/// Network is opt-in per command: only commands the registry allows get it.
+#[tokio::test]
+async fn test_subprocess_network_is_per_command_opt_in() {
+    let executor = ComponentShellExecutor::embedded().expect("Failed to create executor");
+    let mut registry = ComponentRegistry::new();
+    registry.register_wasm("probe", load_test_cmd_bytes());
+    registry.register_wasm("netprobe", load_test_cmd_bytes());
+    registry.allow_network("netprobe");
+    let mut instance = create_shell_with_registry(&executor, Arc::new(registry)).await;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let script = format!("probe net {addr}; netprobe net {addr}");
+    let result = instance
+        .execute(&script, &limits())
+        .await
+        .expect("execute failed");
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "blocked\nconnected\n",
+        "stderr: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}

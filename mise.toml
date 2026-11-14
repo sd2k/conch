@@ -414,7 +414,7 @@ run = 'cargo run -p conch-cli -- --commands-dir /tmp/conch-cmds -c "echo hello w
 [tasks.demo-gh]
 description = "Demo: gh pr list | upper (needs setup-gh-sandbox first)"
 depends = ["wasm-build", "compile-shell-cwasm", "setup-commands-dir", "setup-gh-sandbox"]
-run = 'cargo run -p conch-cli -- --commands-dir /tmp/conch-cmds --sandbox-root /tmp/gh-root -c "gh pr list -R cli/cli --limit 3 | upper"'
+run = 'cargo run -p conch-cli -- --commands-dir /tmp/conch-cmds --sandbox-root /tmp/gh-root --allow-network gh -c "gh pr list -R cli/cli --limit 3 | upper"'
 
 [tasks.demo-sqlite]
 description = "Demo: build sqlite3 (C lane) and run a query through conch (#52)"
@@ -511,8 +511,8 @@ cp "$CERT" /tmp/curl-tls-root/etc/ssl/certs/ca-certificates.crt
 echo "--- curl --version (M1) ---"
 cargo run -q -p conch-cli -- --commands-dir /tmp/conch-cmds -c "curl --version"
 echo "--- curl -sSI http://example.com (M2, plaintext) ---"
-cargo run -q -p conch-cli -- --commands-dir /tmp/conch-cmds -c "curl -sSI http://example.com"
+cargo run -q -p conch-cli -- --commands-dir /tmp/conch-cmds --allow-network curl -c "curl -sSI http://example.com"
 echo "--- curl HTTPS with cert verification (M3, mbedTLS) ---"
-cargo run -q -p conch-cli -- --commands-dir /tmp/conch-cmds --sandbox-root /tmp/curl-tls-root \
+cargo run -q -p conch-cli -- --commands-dir /tmp/conch-cmds --sandbox-root /tmp/curl-tls-root --allow-network curl \
     -c "curl -sSI --cacert /etc/ssl/certs/ca-certificates.crt https://example.com"
 """

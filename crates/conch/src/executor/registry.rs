@@ -4,7 +4,7 @@
 //! to WASM component bytes. When the shell encounters an unknown command,
 //! it looks up the name here to find a component to instantiate.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -40,10 +40,12 @@ pub enum RegistryEntry {
 pub struct ComponentRegistry {
     entries: HashMap<String, RegistryEntry>,
     /// Default sandbox root mounted at `/` for spawned commands. `None` means
-    /// the host's real root (`/`) is mounted — the previous hardcoded fallback.
+    /// nothing is mounted at `/`: the child sees only the shell's mounts.
     default_sandbox_root: Option<PathBuf>,
     /// Per-command sandbox root overrides, taking precedence over the default.
     command_sandbox_roots: HashMap<String, PathBuf>,
+    /// Commands allowed the host network. Every other child has none.
+    network_commands: HashSet<String>,
 }
 
 impl std::fmt::Debug for ComponentRegistry {
@@ -88,7 +90,7 @@ impl ComponentRegistry {
     /// Set the default sandbox root mounted at `/` for every spawned command.
     ///
     /// Builder-style; replaces the old hardcoded `/tmp/gh-root`. When unset,
-    /// the host's real root (`/`) is mounted (the previous fallback behaviour).
+    /// nothing is mounted at `/`.
     #[must_use]
     pub fn with_sandbox_root(mut self, root: impl Into<PathBuf>) -> Self {
         self.default_sandbox_root = Some(root.into());
@@ -107,12 +109,23 @@ impl ComponentRegistry {
     }
 
     /// Resolve the sandbox root for a command: its per-command override if set,
-    /// otherwise the registry default (`None` => mount the real `/`).
+    /// otherwise the registry default (`None` => nothing mounted at `/`).
     pub fn sandbox_root(&self, name: &str) -> Option<&Path> {
         self.command_sandbox_roots
             .get(name)
             .or(self.default_sandbox_root.as_ref())
             .map(PathBuf::as_path)
+    }
+
+    /// Let one command use the host network (e.g. `curl`, `gh`). Children
+    /// have no network unless their command is listed here.
+    pub fn allow_network(&mut self, name: impl Into<String>) {
+        self.network_commands.insert(name.into());
+    }
+
+    /// Whether a command may use the host network.
+    pub fn has_network(&self, name: &str) -> bool {
+        self.network_commands.contains(name)
     }
 
     /// Get the number of registered components.
