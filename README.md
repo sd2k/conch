@@ -1,5 +1,13 @@
 # Conch
 
+> [!WARNING]
+> **Conch is archived and no longer maintained.** It has been superseded by
+> [eryx](https://github.com/eryx-org/eryx), which runs the same brush-based
+> shell as a sandboxed WebAssembly guest alongside Python and JavaScript, with
+> commands, a virtual filesystem and resource limits. New work should use eryx;
+> see [eryx-org/eryx#838](https://github.com/eryx-org/eryx/issues/838) for what
+> was ported from conch.
+
 A sandboxed shell execution engine using WebAssembly.
 
 Named after the conch shell from *Lord of the Flies* — "whoever holds the conch gets to speak."
