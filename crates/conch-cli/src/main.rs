@@ -7,6 +7,8 @@
 //!   conch --commands-dir ./cmds -c "..."  Register WASM components as commands
 //!   conch --commands-dir ./cmds --sandbox-root /tmp/root -c "..."
 //!                                         Mount a sandbox root at / for spawned commands
+//!   conch --commands-dir ./cmds --allow-network curl -c "..."
+//!                                         Let one spawned command use the network
 
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
@@ -19,6 +21,7 @@ async fn main() {
 
     let mut commands_dir: Option<PathBuf> = None;
     let mut sandbox_root: Option<PathBuf> = None;
+    let mut network_commands: Vec<String> = Vec::new();
     let mut script_source: Option<ScriptSource> = None;
     let mut i = 1;
 
@@ -40,6 +43,14 @@ async fn main() {
                     std::process::exit(1);
                 }
                 sandbox_root = Some(PathBuf::from(&args[i]));
+            }
+            "--allow-network" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("conch: --allow-network requires a command name");
+                    std::process::exit(1);
+                }
+                network_commands.push(args[i].clone());
             }
             "-c" => {
                 i += 1;
@@ -107,6 +118,10 @@ async fn main() {
                 root.display()
             );
             registry.set_sandbox_root(root);
+        }
+        for cmd in network_commands {
+            eprintln!("conch: network allowed for spawned command: {cmd}");
+            registry.allow_network(cmd);
         }
         if !registry.is_empty() {
             eprintln!(

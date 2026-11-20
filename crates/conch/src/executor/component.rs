@@ -236,7 +236,7 @@ impl<S: VfsStorage + Clone + 'static> wit::shell::process::HostChild for HybridC
         cmd: String,
         args: Vec<String>,
         env: Vec<(String, String)>,
-        cwd: String,
+        _cwd: String,
     ) -> Result<
         wasmtime::component::Resource<wit::shell::process::Child>,
         wit::shell::process::ProcessError,
@@ -272,11 +272,14 @@ impl<S: VfsStorage + Clone + 'static> wit::shell::process::HostChild for HybridC
             ));
         }
 
-        let child_process = child::spawn_child(component_bytes, &cmd, &args, &env, &cwd, child_vfs)
-            .map_err(|e| {
-                eprintln!("[conch] spawn_child({cmd}) failed: {e}");
-                ProcessError::SpawnFailed
-            })?;
+        let network = registry.has_network(&cmd);
+        let child_process =
+            child::spawn_child(component_bytes, &cmd, &args, &env, child_vfs, network).map_err(
+                |e| {
+                    eprintln!("[conch] spawn_child({cmd}) failed: {e}");
+                    ProcessError::SpawnFailed
+                },
+            )?;
 
         let id = self.next_child_id;
         self.next_child_id += 1;

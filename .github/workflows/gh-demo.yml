@@ -91,7 +91,10 @@ jobs:
           set -euo pipefail
           mkdir -p /tmp/conch-cmds
           cp scratch/gh-component/component.wasm /tmp/conch-cmds/gh.wasm
-          out="$(cargo run -q -p conch-cli -- --commands-dir /tmp/conch-cmds -c 'gh --version')"
+          # Children no longer see the host's `/`; gh needs somewhere to keep
+          # its config, so give it an explicit sandbox root.
+          mkdir -p /tmp/gh-root
+          out="$(cargo run -q -p conch-cli -- --commands-dir /tmp/conch-cmds --sandbox-root /tmp/gh-root -c 'gh --version')"
           echo "--- gh --version output ---"
           echo "$out"
           echo "$out" | grep -q 'gh version 2.87.3' || {
